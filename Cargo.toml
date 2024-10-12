@@ -9,4 +9,4 @@ bytemuck_derive = "1.4.1"
 futures = "0.3.28"
 wgpu = { version = "0.16.0", features = [ "spirv" ] }
 winit = "0.28.6"
-
+image = "0.25.2"
