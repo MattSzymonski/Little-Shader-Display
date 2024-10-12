@@ -1,10 +1,13 @@
-use std::{borrow::Cow, collections::HashMap, fs, iter::once, mem::{self, size_of}, path::PathBuf, process::Command, sync::LazyLock, thread, time::{Duration, SystemTime}};
+mod file_watcher;
+
+use std::{borrow::Cow, collections::HashMap, env, fs, iter::once, mem::{self, size_of}, path::PathBuf, process::Command, sync::LazyLock, thread, time::{Duration, SystemTime}};
 use std::time::Instant;
 use bytemuck::cast_slice;
 use bytemuck_derive::{Pod, Zeroable};
+use file_watcher::FileWatcher;
 use futures::executor::block_on;
 use wgpu::{
-    util::DeviceExt, BufferDescriptor, BufferUsages, Color, CommandEncoderDescriptor, Device, DeviceDescriptor, Features, FragmentState, Instance, LoadOp, MultisampleState, Operations, PipelineLayoutDescriptor, PresentMode, PrimitiveState, RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor, RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource, SurfaceConfiguration, TextureFormat, TextureUsages, TextureViewDescriptor, VertexAttribute, VertexBufferLayout, VertexFormat, VertexState, VertexStepMode
+    util::DeviceExt, BufferDescriptor, BufferUsages, Color, ColorTargetState, CommandEncoderDescriptor, Device, DeviceDescriptor, Features, FragmentState, Instance, LoadOp, MultisampleState, Operations, PipelineLayout, PipelineLayoutDescriptor, PresentMode, PrimitiveState, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions, ShaderModule, ShaderModuleDescriptor, ShaderSource, SurfaceConfiguration, Texture, TextureFormat, TextureUsages, TextureViewDescriptor, VertexAttribute, VertexBufferLayout, VertexFormat, VertexState, VertexStepMode
 };
 use std::path::Path;
 use winit::{
@@ -60,97 +63,40 @@ impl Vertex {
     }
 }
 
-fn compile_shader(shader_path: &str, output_path: &str) {
+fn compile_shader(shader_path: PathBuf, output_path: PathBuf) {
     let status: std::process::ExitStatus = Command::new("./glslc.exe")
-        .arg(shader_path)
+        .arg(shader_path.to_str().unwrap())
         .arg("-o")
         .arg(output_path)
         .status()
         .expect("Failed to execute glslc");
 
     if !status.success() {
-        panic!("Shader compilation failed for {}", shader_path);
+        panic!("Shader compilation failed for {}", shader_path.to_str().unwrap());
     }
 }
 
-struct FileWatcher {
-    path: PathBuf,
-    previous_metadata: HashMap<PathBuf, SystemTime>,
+fn create_render_pipeline(device: &Device, pipeline_layout: &PipelineLayout, swapchain_format: &ColorTargetState, vertex_shader: &ShaderModule, fragment_shader: &ShaderModule) -> RenderPipeline
+{
+    return device.create_render_pipeline(&RenderPipelineDescriptor {
+        label: None,
+        layout: Some(&pipeline_layout),
+        vertex: VertexState {
+            module: &vertex_shader,
+            entry_point: "main",
+            buffers: &[Vertex::layout()],
+        },
+        primitive: PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        fragment: Some(FragmentState {
+            module: &fragment_shader,
+            entry_point: "main",
+            targets: &[Some(swapchain_format.clone())],
+        }),
+        multiview: None,
+    });
 }
-
-impl FileWatcher {
-    pub fn new(path: PathBuf) -> Self {
-        let previous_metadata = Self::get_file_metadata(&path);
-        Self { path, previous_metadata }
-    }
-
-    fn get_file_metadata(path: &Path) -> HashMap<PathBuf, SystemTime> {
-        let mut file_metadata = HashMap::new();
-
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.filter_map(Result::ok) {
-                let path = entry.path();
-                if let Ok(metadata) = path.metadata() {
-                    if let Ok(modified) = metadata.modified() {
-                        if let Some(file_name) = path.file_name() {
-                            if let Some(file_name_str) = file_name.to_str() {
-                                file_metadata.insert(path, modified);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        file_metadata
-    }
-
-    fn check_for_changes(&mut self) -> Vec<PathBuf> {
-        let current_metadata = Self::get_file_metadata(&self.path);
-        let mut changes = Vec::new();
-
-        // Check for modified or new files
-        for (file_path, modified_time) in &current_metadata {
-            match self.previous_metadata.get(file_path) {
-                Some(&prev_time) if prev_time != *modified_time => {
-                    changes.push(file_path.clone());
-                }
-                Some(_) => {
-                    // Do nothing for now, you can add code here if needed
-                }
-                None => {
-                    changes.push(file_path.clone());
-                }
-            }
-        }
-
-        // Check for removed files
-        for file_path in self.previous_metadata.keys() {
-            if !current_metadata.contains_key(file_path) {
-                changes.push(file_path.clone());
-            }
-        }
-
-        // Update previous metadata for the next iteration
-        self.previous_metadata = current_metadata;
-
-        changes
-    }
-
-    fn get_changes(&mut self) -> Option<Vec<PathBuf>> {
-        let changes = self.check_for_changes();
-        if !changes.is_empty() {
-            Some(changes.clone())
-        } else {
-            None
-        }
-    }
-}
-
-static COMPILED_FRAGMENT_SHADER_PATH: &str = "./shaders/built/master.frag.spv";
-static COMPILED_VERTEX_SHADER_PATH: &str = "./shaders/built/master.vert.spv";
-static FRAGMENT_SHADER_PATH: &str = "./shaders/master.frag";
-static VERTEX_SHADER_PATH: &str = "./shaders/master.vert";
 
 static VERTICES: LazyLock<[Vertex; 6]> = LazyLock::new(|| [
     // First triangle (top-left to bottom-right)
@@ -165,15 +111,21 @@ static VERTICES: LazyLock<[Vertex; 6]> = LazyLock::new(|| [
 ]);
 
 fn main() {
-    let mut frame = 0;
+    let shaders_path = env::current_dir().unwrap().join("res").join("shaders");
+    let vertex_shader_path = shaders_path.join("master.vert");
+    let fragment_shader_path = shaders_path.join("master.frag");
+    let compiled_vertex_shader_path = shaders_path.join("compiled").join("master.vert.spv");
+    let compiled_fragment_shader_path = shaders_path.join("compiled").join("master.frag.spv");
 
-    let mut file_change_iterator = FileWatcher::new("D:/Programming/wgpu-cube-example/shaders".into());
+    let mut file_watcher = FileWatcher::new(env::current_dir().unwrap().join(shaders_path));
+
+    let mut frame = 0;
     let start_time = Instant::now();
     let mut event_loop = EventLoop::new(); 
 
     let window = WindowBuilder::new()
         .with_inner_size(LogicalSize::new(1280, 720))
-        .with_title("Hello triangle")
+        .with_title("Shader-Editor-RS")
         .with_visible(false)
         .build(&event_loop)
         .expect("failed to create a window");
@@ -252,42 +204,22 @@ fn main() {
         swapchain_capabilities.formats[0]
     };
     
-    let master_vertex_shader_bytes = include_bytes!("./shaders/built/master.vert.spv");
-    let master_fragment_shader_bytes = include_bytes!("./shaders/built/master.frag.spv");
-
     // Create shaders
-    let vertex_shader = wgpu::ShaderModuleDescriptor {
-        label: Some("master_vertex_shader"),
-        source: wgpu::util::make_spirv(master_vertex_shader_bytes),
-    };
-    let mut vertex_shader = device.create_shader_module(vertex_shader);
-
-    let fragment_shader = wgpu::ShaderModuleDescriptor {
-        label: Some("master_fragment_shader"),
-        source: wgpu::util::make_spirv(master_fragment_shader_bytes),
-    };
-    let mut fragment_shader = device.create_shader_module(fragment_shader);
-
+    let mut vertex_shader = device.create_shader_module(
+        wgpu::ShaderModuleDescriptor {
+            label: Some("master_vertex_shader"),
+            source: wgpu::util::make_spirv(&std::fs::read(compiled_vertex_shader_path.clone()).expect("Failed to read shader file")),
+        }
+    );
+    let mut fragment_shader = device.create_shader_module( 
+        wgpu::ShaderModuleDescriptor {
+            label: Some("master_fragment_shader"),
+            source: wgpu::util::make_spirv(&std::fs::read(compiled_fragment_shader_path.clone()).expect("Failed to read shader file")),
+        }
+    );
  
     // Create render pipeline
-    let mut render_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
-        label: None,
-        layout: Some(&pipeline_layout),
-        vertex: VertexState {
-            module: &vertex_shader,
-            entry_point: "main",
-            buffers: &[Vertex::layout()],
-        },
-        primitive: PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: MultisampleState::default(),
-        fragment: Some(FragmentState {
-            module: &fragment_shader,
-            entry_point: "main",
-            targets: &[Some(swapchian_format.into())],
-        }),
-        multiview: None,
-    });
+    let mut render_pipeline = create_render_pipeline(&device, &pipeline_layout, &swapchian_format.into(), &vertex_shader, &fragment_shader);
 
     let mut config = SurfaceConfiguration {
         usage: TextureUsages::RENDER_ATTACHMENT,
@@ -348,47 +280,30 @@ fn main() {
         queue.write_buffer(&uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
 
         // Check for shader file changes
-        if let Some(paths) = file_change_iterator.get_changes() {
+        if let Some(paths) = file_watcher.get_changes() {
             for path in paths {
                 println!("Shader change detected: {:?}", path);
                 if (path.file_name().unwrap() == "master.vert")
                 {
-                    compile_shader(VERTEX_SHADER_PATH, COMPILED_VERTEX_SHADER_PATH);
+                    compile_shader(vertex_shader_path.clone(), compiled_vertex_shader_path.clone());
                     vertex_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                         label: Some("master_vertex_shader"),
-                        source: wgpu::util::make_spirv(&std::fs::read(COMPILED_VERTEX_SHADER_PATH).expect("Failed to read shader file")),
+                        source: wgpu::util::make_spirv(&std::fs::read(compiled_vertex_shader_path.clone()).expect("Failed to read shader file")),
                     });
                     fragment_shader = fragment_shader;
                 } 
 
                 if (path.file_name().unwrap() == "master.frag")
                 {
-                    compile_shader(FRAGMENT_SHADER_PATH, COMPILED_FRAGMENT_SHADER_PATH);
+                    compile_shader(fragment_shader_path.clone(), compiled_fragment_shader_path.clone());
                     vertex_shader = vertex_shader;
                     fragment_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                         label: Some("master_fragment_shader"),
-                        source: wgpu::util::make_spirv(&std::fs::read(COMPILED_FRAGMENT_SHADER_PATH).expect("Failed to read shader file")),
+                        source: wgpu::util::make_spirv(&std::fs::read(compiled_fragment_shader_path.clone()).expect("Failed to read shader file")),
                     });
                 }    
             
-                render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("Hot Reloaded Pipeline"),
-                    layout: Some(&pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &vertex_shader, // Assuming vertex shader stays the same
-                        entry_point: "main",
-                        buffers: &[Vertex::layout()],
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &fragment_shader, // The hot reloaded fragment shader
-                        entry_point: "main",
-                        targets: &[Some(swapchian_format.into())],
-                    }),
-                    primitive: wgpu::PrimitiveState::default(),
-                    depth_stencil: None,
-                    multisample: wgpu::MultisampleState::default(),
-                    multiview: None,
-                });
+                render_pipeline = create_render_pipeline(&device, &pipeline_layout, &swapchian_format.into(), &vertex_shader, &fragment_shader);
             }
         }
 

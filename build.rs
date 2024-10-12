@@ -7,9 +7,9 @@ fn main()  {
     println!("cargo:rerun-if-changed=res/shaders/*");
 
     // Compile GLSL shaders into SPIR-V
-    let shader_compiler_path = "shaders\\glslc.exe";
-    let shader_directory_path = "shaders";
-    let built_shader_directory_path = "shaders\\built";
+    let shader_compiler_path = ".\\glslc.exe";
+    let shader_directory_path = "res\\shaders";
+    let built_shader_directory_path = "res\\shaders\\compiled";
 
     let shaders_to_compile = [
         "master.vert", 

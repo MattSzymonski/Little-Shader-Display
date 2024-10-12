@@ -1,5 +1,5 @@
 [package]
-name = "wgpu-samples"
+name = "shader_editor_rs"
 version = "0.1.0"
 edition = "2021"
 
@@ -10,6 +10,3 @@ futures = "0.3.28"
 wgpu = { version = "0.16.0", features = [ "spirv" ] }
 winit = "0.28.6"
 
-[[bin]]
-name = "hello-triangle"
-path = "main.rs"
