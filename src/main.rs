@@ -134,7 +134,7 @@ static VERTICES: LazyLock<[Vertex; 6]> = LazyLock::new(|| [
 
 
 fn main() {
-    let use_st7789: bool = false;
+    let use_st7789: bool = true;
     let use_window: bool = false;
 
     if use_st7789 && cfg!(target_os = "windows") {
@@ -144,8 +144,12 @@ fn main() {
     if !use_window && cfg!(target_os = "windows") {
         panic!("No display chosen for Windows");
     }
+
+    if !use_window && !use_st7789 && cfg!(target_os = "linux") {
+        panic!("No display chosen for Linux");
+    }
     
-    let output_size: u32 = 64;
+    let output_size: u32 = 256;
     let shaders_path = env::current_dir().unwrap().join("res").join("shaders");
     let vertex_shader_path = shaders_path.join("master.vert");
     let fragment_shader_path = shaders_path.join("master.frag");
@@ -153,10 +157,9 @@ fn main() {
     let compiled_fragment_shader_path = shaders_path.join("compiled").join("master.frag.spv");
 
     #[cfg(target_os = "linux")]
-    {
-        let mut st7789 = if use_st7789 { Some(raspberry_st7789_driver::RaspberryST7789Driver::new().unwrap()) } else { None };
-        if use_st7789 { st7789.initialize().unwrap(); }
-    }
+    let mut st7789 = if use_st7789 { Some(raspberry_st7789_driver::RaspberryST7789Driver::new().unwrap()) } else { None };
+    #[cfg(target_os = "linux")]
+    if use_st7789 { st7789.as_mut().unwrap().initialize().unwrap(); }
 
     let mut file_watcher = FileWatcher::new(env::current_dir().unwrap().join(shaders_path));
 
@@ -347,7 +350,7 @@ fn main() {
                 let mut texture_data = read_texture(&device, &queue, &output_image_texture);
                 let mut retain_counter = 0;
                 texture_data.retain(|_| { retain_counter += 1; retain_counter % 4 != 0 });
-                st7789.draw_raw(&texture_data, true).unwrap();
+                st7789.as_mut().unwrap().draw_raw(&texture_data, true).unwrap();
             }
         }
         

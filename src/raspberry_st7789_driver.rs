@@ -123,7 +123,7 @@ impl RaspberryST7789Driver {
         let rgb565_data = pack_888_to_rgb565(&image_bytes, is_bgr); 
         let rgb565_data_split = rgb565_to_u8(&rgb565_data);
         let raw_image: ImageRawLE<Rgb565> = ImageRawLE::new(&rgb565_data_split, (rgb565_data.len() as f32).sqrt() as u32);
-        let image = Image::new(&raw_image, Point::new(50, 50));
+        let image = Image::new(&raw_image, Point::new(-50, 0));
         image.draw(&mut self.display);
         //self.display.flush()?;
         Ok(())
