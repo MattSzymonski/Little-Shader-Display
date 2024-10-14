@@ -1,5 +1,7 @@
 #!/bin/bash
 
+cargo build --release --target aarch64-unknown-linux-gnu
+
 scp ./res/shaders/master.frag \
     ./res/shaders/master.vert \
     mattszymonski@192.168.0.130:/home/mattszymonski/programming/shader-editor-rs/res/shaders/
