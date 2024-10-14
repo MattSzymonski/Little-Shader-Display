@@ -2,21 +2,22 @@ use std::error::Error;
 use std::thread;
 use std::time::Duration;
 
-use display_interface_spi::SPIInterfaceNoCS;
+use display_interface_spi::SPIInterface;
 use embedded_graphics::image::{Image, ImageRawLE};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::{Point, RgbColor, Transform};
 use embedded_graphics::primitives::{Circle, PrimitiveStyle};
+use embedded_hal_bus::spi::ExclusiveDevice;
+use mipidsi::models::ST7789;
+use mipidsi::options::ColorInversion;
+use mipidsi::Builder;
 use rppal::gpio::Gpio;
+use rppal::hal::Delay;
 use rppal::spi::{Bus, Mode, SlaveSelect, Spi};
 use rppal::system::DeviceInfo;
-use st7789::{Orientation, ST7789};
-use embedded_hal::digital::v2::OutputPin as EmbeddedOutputPin;
 use rppal::gpio::OutputPin as RppalOutputPin;
 use rppal::gpio::Error as RppalError;
 use rppal::spi::{Error as SpiError};
-use embedded_hal::blocking::spi::Write; 
-use embedded_hal::blocking::delay::DelayUs; 
 use embedded_graphics::Drawable;
 use embedded_graphics::draw_target::DrawTarget;
 
@@ -25,95 +26,54 @@ const RST_PIN_NUMBER: u8 = 27;
 const CS_PIN_NUMBER: u8 = 8;
 const BL_PIN_NUMBER: u8 = 18;
 
-pub struct RaspberryDelayOutputPin {
-    pin: RppalOutputPin,
-}
 
-// Implement the OutputPin trait for the wrapper
-impl RaspberryDelayOutputPin {
-    pub fn new(pin: RppalOutputPin) -> Self {
-        Self { pin }
-    }
-}
+struct NoCs;
 
-impl EmbeddedOutputPin for RaspberryDelayOutputPin {
-    type Error = RppalError; // Using rppal's error type
-
+impl embedded_hal::digital::OutputPin for NoCs {
     fn set_low(&mut self) -> Result<(), Self::Error> {
-        Ok(self.pin.set_low())
+        Ok(())
     }
 
     fn set_high(&mut self) -> Result<(), Self::Error> {
-        Ok(self.pin.set_high())
-    }
-
-    fn set_state(&mut self, state: embedded_hal::digital::v2::PinState) -> Result<(), Self::Error> {
-        match state {
-            embedded_hal::digital::v2::PinState::Low => self.set_low(),
-            embedded_hal::digital::v2::PinState::High => self.set_high(),
-        }
-    }
-}
-
-pub struct RaspberryDelay;
-
-impl RaspberryDelay {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl DelayUs<u32> for RaspberryDelay {
-    fn delay_us(&mut self, us: u32) {
-        thread::sleep(Duration::from_micros(us as u64));
-    }
-}
-
-pub struct RaspberrySpi {
-    spi: Spi,
-}
-
-impl RaspberrySpi {
-    pub fn new(spi: Spi) -> Self {
-        Self { spi }
-    }
-}
-
-impl Write<u8> for RaspberrySpi {
-    type Error = SpiError; 
-    fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
-        self.spi.write(words)?;
         Ok(())
     }
 }
 
+impl embedded_hal::digital::ErrorType for NoCs {
+    type Error = core::convert::Infallible;
+}
 pub struct RaspberryST7789Driver {
-    delay: RaspberryDelay,
-    display: ST7789<SPIInterfaceNoCS<RaspberrySpi, RaspberryDelayOutputPin>, RaspberryDelayOutputPin>,
+    display: mipidsi::Display<SPIInterface<ExclusiveDevice<Spi, NoCs, embedded_hal_bus::spi::NoDelay>, RppalOutputPin>, ST7789, mipidsi::NoResetPin>,
 }
 
 impl RaspberryST7789Driver {
     pub fn new() -> Result<Self, Box<dyn Error>>  {
-        let gpio = Gpio::new()?; 
-        let dc_pin = RaspberryDelayOutputPin::new(gpio.get(DC_PIN_NUMBER)?.into_output());
-        let rst_pin = RaspberryDelayOutputPin::new(gpio.get(RST_PIN_NUMBER)?.into_output());
-        let cs_pin = RaspberryDelayOutputPin::new(gpio.get(CS_PIN_NUMBER)?.into_output());
-        let bl_pin = RaspberryDelayOutputPin::new(gpio.get(BL_PIN_NUMBER)?.into_output());
+        let gpio = Gpio::new().unwrap();
+        let dc_pin = gpio.get(DC_PIN_NUMBER)?.into_output();
+        let rst_pin = gpio.get(RST_PIN_NUMBER)?.into_output();
+        let cs_pin = gpio.get(CS_PIN_NUMBER)?.into_output();
+        let bl_pin = gpio.get(BL_PIN_NUMBER)?.into_output();
         
-        let spi = RaspberrySpi::new(Spi::new(Bus::Spi0, SlaveSelect::Ss0, 16_000_000, Mode::Mode0)?);
-        let display_interface = SPIInterfaceNoCS::new(spi, dc_pin);
-        let display = ST7789::new(display_interface, rst_pin, 240, 280);
-    
+        let spi = Spi::new(Bus::Spi0, SlaveSelect::Ss1, 60_000_000_u32, Mode::Mode0).unwrap();
+        let spi_device = ExclusiveDevice::new_no_delay(spi, NoCs).unwrap();
+        let di = SPIInterface::new(spi_device, dc_pin);
+        let mut delay = Delay::new();
+        let mut display = Builder::new(ST7789, di)
+            .display_size(240 as u16, 280 as u16)
+            .invert_colors(ColorInversion::Inverted)
+            .init(&mut delay)
+            .unwrap();
+
+            display.clear(Rgb565::BLACK).unwrap();
         Ok(Self {
-            delay: RaspberryDelay::new(),
             display,
         })    
     }
 
     pub fn initialize(&mut self) -> Result<(), Box<dyn Error>> {
-        self.display.init(&mut self.delay);
-        self.display.set_orientation(Orientation::Portrait);
-        self.display.clear(Rgb565::BLACK);
+        //self.display.init(&mut self.delay);
+        //self.display.set_orientation(Orientation::Portrait);
+        //self.display.  clear(Rgb565::BLACK);
         //self.display.flush()?;
         Ok(())
     }
@@ -123,7 +83,7 @@ impl RaspberryST7789Driver {
         let rgb565_data = pack_888_to_rgb565(&image_bytes, is_bgr); 
         let rgb565_data_split = rgb565_to_u8(&rgb565_data);
         let raw_image: ImageRawLE<Rgb565> = ImageRawLE::new(&rgb565_data_split, (rgb565_data.len() as f32).sqrt() as u32);
-        let image = Image::new(&raw_image, Point::new(-50, 0));
+        let image = Image::new(&raw_image, Point::new(-30, 0));
         image.draw(&mut self.display);
         //self.display.flush()?;
         Ok(())
