@@ -1,4 +1,5 @@
 mod file_watcher;
+mod raspberry_st7789_driver;
 
 use std::{borrow::Cow, collections::HashMap, env, fs, io::Read, iter::{self, once}, mem::{self, size_of}, path::PathBuf, process::Command, sync::LazyLock, thread, time::{Duration, SystemTime}};
 use std::time::Instant;
@@ -7,6 +8,7 @@ use bytemuck_derive::{Pod, Zeroable};
 use file_watcher::FileWatcher;
 use futures::executor::block_on;
 use image::{ImageBuffer, Rgba, RgbaImage};
+use raspberry_st7789_driver::RaspberryST7789Driver;
 use wgpu::{
     util::DeviceExt, BufferDescriptor, BufferUsages, Color, ColorTargetState, CommandEncoderDescriptor, Device, DeviceDescriptor, Features, FragmentState, Instance, LoadOp, MultisampleState, Operations, PipelineLayout, PipelineLayoutDescriptor, PresentMode, PrimitiveState, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions, ShaderModule, ShaderModuleDescriptor, ShaderSource, SurfaceConfiguration, Texture, TextureFormat, TextureUsages, TextureViewDescriptor, VertexAttribute, VertexBufferLayout, VertexFormat, VertexState, VertexStepMode
 };
@@ -65,15 +67,26 @@ impl Vertex {
 }
 
 fn compile_shader(shader_path: PathBuf, output_path: PathBuf) {
-    let status: std::process::ExitStatus = Command::new("./glslc.exe")
-        .arg(shader_path.to_str().unwrap())
-        .arg("-o")
-        .arg(output_path)
-        .status()
-        .expect("Failed to execute glslc");
-
-    if !status.success() {
-        panic!("Shader compilation failed for {}", shader_path.to_str().unwrap());
+    if cfg!(target_os = "windows") {
+        let status: std::process::ExitStatus = Command::new("./glslc.exe")
+            .arg(shader_path.to_str().unwrap())
+            .arg("-o")
+            .arg(output_path)
+            .status()
+            .expect("Failed to execute glslc");
+        if !status.success() {
+            panic!("Shader compilation failed for {}", shader_path.to_str().unwrap());
+        }
+    } else {
+        let status: std::process::ExitStatus = Command::new("./glslc")
+            .arg(shader_path.to_str().unwrap())
+            .arg("-o")
+            .arg(output_path)
+            .status()
+            .expect("Failed to execute glslc");
+        if !status.success() {
+            panic!("Shader compilation failed for {}", shader_path.to_str().unwrap());
+        }
     }
 }
 
@@ -112,12 +125,15 @@ static VERTICES: LazyLock<[Vertex; 6]> = LazyLock::new(|| [
 ]);
 
 fn main() {
-    let output_size: u32 = 256;
+    let output_size: u32 = 64;
     let shaders_path = env::current_dir().unwrap().join("res").join("shaders");
     let vertex_shader_path = shaders_path.join("master.vert");
     let fragment_shader_path = shaders_path.join("master.frag");
     let compiled_vertex_shader_path = shaders_path.join("compiled").join("master.vert.spv");
     let compiled_fragment_shader_path = shaders_path.join("compiled").join("master.frag.spv");
+
+    let mut st7789 = RaspberryST7789Driver::new().unwrap();
+    st7789.initialize().unwrap();
 
     let mut file_watcher = FileWatcher::new(env::current_dir().unwrap().join(shaders_path));
 
@@ -210,7 +226,7 @@ fn main() {
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
+        format: swapchain_format,// wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
@@ -269,7 +285,7 @@ fn main() {
             let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: None,
                 color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &frame_view, // texture_view
+                    view: &texture_view, // &frame_view OR &texture_view
                     resolve_target: None,
                     ops: Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -287,10 +303,21 @@ fn main() {
 
         queue.submit(once(encoder.finish()));
 
-        //let texture_data = read_texture(&device, &queue, &output_image_texture);
+        let mut texture_data = read_texture(&device, &queue, &output_image_texture);
+
+        // Remove alpha channel
+        let mut retain_counter = 0;
+        texture_data.retain(|_| { retain_counter += 1; retain_counter % 4 != 0 });
+
+        // for texture_dataa in texture_data.clone() {
+        //     println!("0b{:08b}", texture_dataa);
+        // }
+
+        st7789.draw_raw(&texture_data, true).unwrap();
+
         //save_as_png(texture_data, output_size, output_size, "output.png").unwrap();
 
-        //return;
+        return;
 
         frame.present();
     }
@@ -298,7 +325,7 @@ fn main() {
 
 
 
-fn initialize_wgpu(window: &winit::window::Window) -> (wgpu::Device, wgpu::Queue, wgpu::Surface, wgpu::SurfaceConfiguration, wgpu::ColorTargetState) {
+fn initialize_wgpu(window: &winit::window::Window) -> (wgpu::Device, wgpu::Queue, wgpu::Surface, wgpu::SurfaceConfiguration, wgpu::TextureFormat) {
     let physical_size = window.inner_size();
 
     let instance = Instance::default();
@@ -321,6 +348,7 @@ fn initialize_wgpu(window: &winit::window::Window) -> (wgpu::Device, wgpu::Queue
     .expect("failed to create a device");
 
     let swapchain_capabilities = surface.get_capabilities(&adapter);
+    println!("Swapchain capabilities: {:?}", swapchain_capabilities.formats);
     let swapchain_format = if swapchain_capabilities.formats.contains(&TextureFormat::Rgba8Unorm)
     {
         TextureFormat::Rgba8Unorm
@@ -347,7 +375,7 @@ fn initialize_wgpu(window: &winit::window::Window) -> (wgpu::Device, wgpu::Queue
 
     surface.configure(&device, &surface_config);
 
-    (device, queue, surface, surface_config, swapchain_format.into())
+    (device, queue, surface, surface_config, swapchain_format)
 }
 
 fn handle_window_event(
