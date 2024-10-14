@@ -14,5 +14,5 @@ Cross-compilation is required since Raspberry Pi Zero W 2 is too weak to compile
 2. Running on Raspberry Pi board:
     1. Connect ST7789 screen to the pins as presented [here](https://www.waveshare.com/wiki/1.69inch_LCD_Module)
     1. Install glslc shader compiler using `sudo apt-get install glslc` or download it [here](https://storage.googleapis.com/shaderc/badges/build_link_linux_gcc_release.html)
-    2. ./shader-editor-rs
+    2. Run the program using `./shader-editor-rs`
     3. Modify the shaders
