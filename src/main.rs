@@ -1,5 +1,9 @@
 mod file_watcher;
+
+#[cfg(target_os = "linux")]
 mod raspberry_st7789_driver;
+
+
 
 use std::{borrow::Cow, collections::HashMap, env, fs, io::Read, iter::{self, once}, mem::{self, size_of}, path::PathBuf, process::Command, sync::LazyLock, thread, time::{Duration, SystemTime}};
 use std::time::Instant;
@@ -8,7 +12,7 @@ use bytemuck_derive::{Pod, Zeroable};
 use file_watcher::FileWatcher;
 use futures::executor::block_on;
 use image::{ImageBuffer, Rgba, RgbaImage};
-use raspberry_st7789_driver::RaspberryST7789Driver;
+
 use wgpu::{
     util::DeviceExt, BufferDescriptor, BufferUsages, Color, ColorTargetState, CommandEncoderDescriptor, Device, DeviceDescriptor, Features, FragmentState, Instance, LoadOp, MultisampleState, Operations, PipelineLayout, PipelineLayoutDescriptor, PresentMode, PrimitiveState, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions, ShaderModule, ShaderModuleDescriptor, ShaderSource, SurfaceConfiguration, Texture, TextureFormat, TextureUsages, TextureViewDescriptor, VertexAttribute, VertexBufferLayout, VertexFormat, VertexState, VertexStepMode
 };
@@ -90,7 +94,7 @@ fn compile_shader(shader_path: PathBuf, output_path: PathBuf) {
     }
 }
 
-fn create_render_pipeline(device: &Device, pipeline_layout: &PipelineLayout, swapchain_format: &ColorTargetState, vertex_shader: &ShaderModule, fragment_shader: &ShaderModule) -> RenderPipeline
+fn create_render_pipeline(device: &Device, pipeline_layout: &PipelineLayout, output_format: &TextureFormat, vertex_shader: &ShaderModule, fragment_shader: &ShaderModule) -> RenderPipeline
 {
     return device.create_render_pipeline(&RenderPipelineDescriptor {
         label: None,
@@ -106,7 +110,11 @@ fn create_render_pipeline(device: &Device, pipeline_layout: &PipelineLayout, swa
         fragment: Some(FragmentState {
             module: &fragment_shader,
             entry_point: "main",
-            targets: &[Some(swapchain_format.clone())],
+            targets: &[Some(ColorTargetState {
+                format: *output_format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
         }),
         multiview: None,
     });
@@ -124,7 +132,10 @@ static VERTICES: LazyLock<[Vertex; 6]> = LazyLock::new(|| [
     Vertex::new(1.0, -1.0, 1.0, 0.0),    // Bottom-right
 ]);
 
+
 fn main() {
+    let use_window: bool = false;
+
     let output_size: u32 = 64;
     let shaders_path = env::current_dir().unwrap().join("res").join("shaders");
     let vertex_shader_path = shaders_path.join("master.vert");
@@ -132,8 +143,11 @@ fn main() {
     let compiled_vertex_shader_path = shaders_path.join("compiled").join("master.vert.spv");
     let compiled_fragment_shader_path = shaders_path.join("compiled").join("master.frag.spv");
 
-    let mut st7789 = RaspberryST7789Driver::new().unwrap();
-    st7789.initialize().unwrap();
+    #[cfg(target_os = "linux")]
+    {
+        let mut st7789 = raspberry_st7789_driver::RaspberryST7789Driver::new().unwrap();
+        st7789.initialize().unwrap();
+    }
 
     let mut file_watcher = FileWatcher::new(env::current_dir().unwrap().join(shaders_path));
 
@@ -141,15 +155,17 @@ fn main() {
     let start_time = Instant::now();
     let mut event_loop = EventLoop::new(); 
 
-    let window = WindowBuilder::new()
+
+    let window: Option<Window> = if use_window { Some(WindowBuilder::new()
         .with_inner_size(LogicalSize::new(1280, 720))
         .with_title("Shader-Editor-RS")
         .with_visible(false)
         .build(&event_loop)
-        .expect("failed to create a window");
+        .expect("failed to create a window"))
+    } else { None };
 
     // Initialize wgpu  
-    let (device, queue, surface, mut surface_config, swapchain_format) = initialize_wgpu(&window);
+    let (device, queue, surface, mut surface_config, output_format) = if use_window { initialize_wgpu(&window.as_ref().unwrap()) } else { initialize_wgpu_no_window() };
 
     // Create uniform buffer
     let mut uniforms = Uniforms::new();
@@ -205,7 +221,8 @@ fn main() {
     );
  
     // Create render pipeline
-    let mut render_pipeline = create_render_pipeline(&device, &pipeline_layout, &swapchain_format.clone().into(), &vertex_shader, &fragment_shader);
+   
+    let mut render_pipeline = create_render_pipeline(&device, &pipeline_layout, &output_format, &vertex_shader, &fragment_shader);
 
     let vbo = device.create_buffer(&BufferDescriptor {
         label: None,
@@ -226,21 +243,26 @@ fn main() {
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: swapchain_format,// wgpu::TextureFormat::Rgba8Unorm,
+        format: output_format,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
 
     queue.write_buffer(&vbo, 0, cast_slice(&*VERTICES));
 
-    window.set_visible(true);
+    if use_window {
+        window.as_ref().unwrap().set_visible(true);
+    }
+    
     let mut running = true;
     
     while running {
         frame += 1;
 
         // Window event handling
-        running = handle_window_event(running, &mut event_loop, &device, &surface, &mut surface_config);
+        if use_window {
+            running = handle_window_event(running, &mut event_loop, &device, &surface.as_ref().unwrap(), &mut surface_config.as_mut().unwrap());
+        }
 
         // Calculate elapsed time
         let elapsed_time = start_time.elapsed().as_secs_f32();
@@ -271,21 +293,25 @@ fn main() {
                     });
                 }    
             
-                render_pipeline = create_render_pipeline(&device, &pipeline_layout, &swapchain_format.clone().into(), &vertex_shader, &fragment_shader);
+                render_pipeline = create_render_pipeline(&device, &pipeline_layout, &output_format.clone().into(), &vertex_shader, &fragment_shader);
             }
         }
 
-        let frame = surface.get_current_texture().expect("failed to get next swapchain texture");
-        let frame_view = frame.texture.create_view(&TextureViewDescriptor::default());
-        let texture_view = output_image_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        let frame = if use_window { Some(surface.as_ref().unwrap().get_current_texture().expect("failed to get next swapchain texture")) } else { None };
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor { label: None });
 
         {
+            let view = if use_window { 
+                &frame.as_ref().unwrap().texture.create_view(&TextureViewDescriptor::default())
+            } else { 
+                &output_image_texture.create_view(&wgpu::TextureViewDescriptor::default())
+            };
+
             let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: None,
                 color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &texture_view, // &frame_view OR &texture_view
+                    view: &view, 
                     resolve_target: None,
                     ops: Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -302,30 +328,53 @@ fn main() {
         }
 
         queue.submit(once(encoder.finish()));
+        // let mut texture_data = read_texture(&device, &queue, &output_image_texture);
+        // save_as_png(texture_data, output_size, output_size, "output.png").unwrap();
+        // return;
 
-        let mut texture_data = read_texture(&device, &queue, &output_image_texture);
-
-        // Remove alpha channel
-        let mut retain_counter = 0;
-        texture_data.retain(|_| { retain_counter += 1; retain_counter % 4 != 0 });
-
-        // for texture_dataa in texture_data.clone() {
-        //     println!("0b{:08b}", texture_dataa);
-        // }
-
-        st7789.draw_raw(&texture_data, true).unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            let mut texture_data = read_texture(&device, &queue, &output_image_texture);
+            let mut retain_counter = 0;
+            texture_data.retain(|_| { retain_counter += 1; retain_counter % 4 != 0 });
+            st7789.draw_raw(&texture_data, true).unwrap();
+        }
+        
+        if use_window
+        {
+            frame.unwrap().present();
+        }
 
         //save_as_png(texture_data, output_size, output_size, "output.png").unwrap();
+        //return;
 
-        return;
-
-        frame.present();
     }
 }
 
+fn initialize_wgpu_no_window() -> (wgpu::Device, wgpu::Queue, Option<wgpu::Surface>, Option<wgpu::SurfaceConfiguration>, wgpu::TextureFormat) {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
 
+    let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None, 
+        force_fallback_adapter: false,
+    }))
+    .expect("Failed to find a suitable adapter");
 
-fn initialize_wgpu(window: &winit::window::Window) -> (wgpu::Device, wgpu::Queue, wgpu::Surface, wgpu::SurfaceConfiguration, wgpu::TextureFormat) {
+    let (device, queue) = block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            label: None,
+            features: wgpu::Features::empty(),
+            limits: adapter.limits(),
+        },
+        None,
+    ))
+    .expect("Failed to create device");
+
+    (device, queue, None, None, TextureFormat::Rgba8Unorm)
+}
+
+fn initialize_wgpu(window: &winit::window::Window) -> (wgpu::Device, wgpu::Queue, Option<wgpu::Surface>, Option<wgpu::SurfaceConfiguration>, wgpu::TextureFormat) {
     let physical_size = window.inner_size();
 
     let instance = Instance::default();
@@ -348,7 +397,6 @@ fn initialize_wgpu(window: &winit::window::Window) -> (wgpu::Device, wgpu::Queue
     .expect("failed to create a device");
 
     let swapchain_capabilities = surface.get_capabilities(&adapter);
-    println!("Swapchain capabilities: {:?}", swapchain_capabilities.formats);
     let swapchain_format = if swapchain_capabilities.formats.contains(&TextureFormat::Rgba8Unorm)
     {
         TextureFormat::Rgba8Unorm
@@ -362,7 +410,6 @@ fn initialize_wgpu(window: &winit::window::Window) -> (wgpu::Device, wgpu::Queue
         swapchain_capabilities.formats[0]
     };
 
-    
     let surface_config: wgpu::SurfaceConfiguration = SurfaceConfiguration {
         usage: TextureUsages::RENDER_ATTACHMENT,
         format: swapchain_format,
@@ -375,7 +422,7 @@ fn initialize_wgpu(window: &winit::window::Window) -> (wgpu::Device, wgpu::Queue
 
     surface.configure(&device, &surface_config);
 
-    (device, queue, surface, surface_config, swapchain_format)
+    (device, queue, Some(surface), Some(surface_config), swapchain_format)
 }
 
 fn handle_window_event(
