@@ -134,8 +134,17 @@ static VERTICES: LazyLock<[Vertex; 6]> = LazyLock::new(|| [
 
 
 fn main() {
+    let use_st7789: bool = false;
     let use_window: bool = false;
 
+    if use_st7789 && cfg!(target_os = "windows") {
+        panic!("ST7789 display is not supported on Windows");
+    }
+
+    if !use_window && cfg!(target_os = "windows") {
+        panic!("No display chosen for Windows");
+    }
+    
     let output_size: u32 = 64;
     let shaders_path = env::current_dir().unwrap().join("res").join("shaders");
     let vertex_shader_path = shaders_path.join("master.vert");
@@ -145,8 +154,8 @@ fn main() {
 
     #[cfg(target_os = "linux")]
     {
-        let mut st7789 = raspberry_st7789_driver::RaspberryST7789Driver::new().unwrap();
-        st7789.initialize().unwrap();
+        let mut st7789 = if use_st7789 { Some(raspberry_st7789_driver::RaspberryST7789Driver::new().unwrap()) } else { None };
+        if use_st7789 { st7789.initialize().unwrap(); }
     }
 
     let mut file_watcher = FileWatcher::new(env::current_dir().unwrap().join(shaders_path));
@@ -154,7 +163,6 @@ fn main() {
     let mut frame = 0;
     let start_time = Instant::now();
     let mut event_loop = EventLoop::new(); 
-
 
     let window: Option<Window> = if use_window { Some(WindowBuilder::new()
         .with_inner_size(LogicalSize::new(1280, 720))
@@ -334,20 +342,19 @@ fn main() {
 
         #[cfg(target_os = "linux")]
         {
-            let mut texture_data = read_texture(&device, &queue, &output_image_texture);
-            let mut retain_counter = 0;
-            texture_data.retain(|_| { retain_counter += 1; retain_counter % 4 != 0 });
-            st7789.draw_raw(&texture_data, true).unwrap();
+            if use_st7789
+            {
+                let mut texture_data = read_texture(&device, &queue, &output_image_texture);
+                let mut retain_counter = 0;
+                texture_data.retain(|_| { retain_counter += 1; retain_counter % 4 != 0 });
+                st7789.draw_raw(&texture_data, true).unwrap();
+            }
         }
         
         if use_window
         {
             frame.unwrap().present();
         }
-
-        //save_as_png(texture_data, output_size, output_size, "output.png").unwrap();
-        //return;
-
     }
 }
 
