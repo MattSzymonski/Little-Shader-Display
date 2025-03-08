@@ -1,10 +1,10 @@
 [package]
-name = "shader_editor_rs"
+name = "little_shader_display"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "shader-editor-rs"
+name = "little-shader-display"
 path = "./src/main.rs"
 
 [dependencies]

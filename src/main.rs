@@ -3,8 +3,6 @@ mod file_watcher;
 #[cfg(target_os = "linux")]
 mod raspberry_st7789_driver;
 
-
-
 use std::{borrow::Cow, collections::HashMap, env, fs, io::Read, iter::{self, once}, mem::{self, size_of}, path::PathBuf, process::Command, sync::LazyLock, thread, time::{Duration, SystemTime}};
 use std::time::Instant;
 use bytemuck::cast_slice;
@@ -24,7 +22,6 @@ use winit::{
     platform::run_return::EventLoopExtRunReturn,
     window::{Window, WindowBuilder},
 };
-
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
@@ -70,56 +67,9 @@ impl Vertex {
     }
 }
 
-fn compile_shader(shader_path: PathBuf, output_path: PathBuf) {
-    if cfg!(target_os = "windows") {
-        let status: std::process::ExitStatus = Command::new("./glslc.exe")
-            .arg(shader_path.to_str().unwrap())
-            .arg("-o")
-            .arg(output_path)
-            .status()
-            .expect("Failed to execute glslc");
-        if !status.success() {
-            panic!("Shader compilation failed for {}", shader_path.to_str().unwrap());
-        }
-    } else {
-        let status: std::process::ExitStatus = Command::new("./glslc")
-            .arg(shader_path.to_str().unwrap())
-            .arg("-o")
-            .arg(output_path)
-            .status()
-            .expect("Failed to execute glslc");
-        if !status.success() {
-            panic!("Shader compilation failed for {}", shader_path.to_str().unwrap());
-        }
-    }
-}
 
-fn create_render_pipeline(device: &Device, pipeline_layout: &PipelineLayout, output_format: &TextureFormat, vertex_shader: &ShaderModule, fragment_shader: &ShaderModule) -> RenderPipeline
-{
-    return device.create_render_pipeline(&RenderPipelineDescriptor {
-        label: None,
-        layout: Some(&pipeline_layout),
-        vertex: VertexState {
-            module: &vertex_shader,
-            entry_point: "main",
-            buffers: &[Vertex::layout()],
-        },
-        primitive: PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: MultisampleState::default(),
-        fragment: Some(FragmentState {
-            module: &fragment_shader,
-            entry_point: "main",
-            targets: &[Some(ColorTargetState {
-                format: *output_format,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
-        multiview: None,
-    });
-}
 
+// Vertices of two screen filling triangles
 static VERTICES: LazyLock<[Vertex; 6]> = LazyLock::new(|| [
     // First triangle (top-left to bottom-right)
     Vertex::new(-1.0, 1.0, 0.0, 1.0),    // Top-left
@@ -132,13 +82,27 @@ static VERTICES: LazyLock<[Vertex; 6]> = LazyLock::new(|| [
     Vertex::new(1.0, -1.0, 1.0, 0.0),    // Bottom-right
 ]);
 
-
 fn main() {
-    let use_st7789: bool = true;
-    let use_window: bool = false;
+    let args: Vec<String> = env::args().collect();
+
+    let mut use_window = false;
+    let mut use_st7789 = false;
+
+    // Parse command-line arguments
+    for arg in &args {
+        match arg.as_str() {
+            "--window" => use_window = true,
+            "--st7789" => use_st7789 = true,
+            _ => {}
+        }
+    }
+
+    // Print the selected options
+    println!("Using window display: {}", use_window);
+    println!("Using st7789 display: {}", use_st7789);
 
     if use_st7789 && cfg!(target_os = "windows") {
-        panic!("ST7789 display is not supported on Windows");
+        panic!("st7789 display is not supported on Windows");
     }
 
     if !use_window && cfg!(target_os = "windows") {
@@ -163,22 +127,23 @@ fn main() {
 
     let mut file_watcher = FileWatcher::new(env::current_dir().unwrap().join(shaders_path));
 
-    let mut frame = 0;
     let start_time = Instant::now();
     let mut event_loop = EventLoop::new(); 
 
     let window: Option<Window> = if use_window { Some(WindowBuilder::new()
         .with_inner_size(LogicalSize::new(1280, 720))
-        .with_title("Shader-Editor-RS")
+        .with_title("Little Shader Display")
         .with_visible(false)
         .build(&event_loop)
         .expect("failed to create a window"))
     } else { None };
 
     // Initialize wgpu  
-    let (device, queue, surface, mut surface_config, output_format) = if use_window { initialize_wgpu(&window.as_ref().unwrap()) } else { initialize_wgpu_no_window() };
+    let (device, queue, surface, mut surface_config, output_format) = if use_window { initialize_wgpu_with_window(&window.as_ref().unwrap()) } else { initialize_wgpu_no_window() };
 
-    // Create uniform buffer
+    // ------- Prepare resources -------
+
+    // 1. Create uniform buffer
     let mut uniforms = Uniforms::new();
     let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Uniform Buffer"),
@@ -186,7 +151,7 @@ fn main() {
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
 
-    // Create a bind group layout for the uniform
+    // 2. Create a bind group layout for the uniform
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("uniform_bind_group_layout"),
         entries: &[wgpu::BindGroupLayoutEntry {
@@ -201,7 +166,7 @@ fn main() {
         }],
     });
 
-    // Create a bind group
+    // 3. Create a bind group
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         layout: &bind_group_layout,
         entries: &[wgpu::BindGroupEntry {
@@ -211,43 +176,45 @@ fn main() {
         label: Some("uniform_bind_group"),
     });
 
+    // 4. Create a pipeline layout
     let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
         label: None,
         bind_group_layouts: &[&bind_group_layout],
         push_constant_ranges: &[],
     });
 
-    // Create shaders
-    let mut vertex_shader = device.create_shader_module(
-        wgpu::ShaderModuleDescriptor {
-            label: Some("master_vertex_shader"),
-            source: wgpu::util::make_spirv(&std::fs::read(compiled_vertex_shader_path.clone()).expect("Failed to read shader file")),
-        }
-    );
-    let mut fragment_shader = device.create_shader_module( 
-        wgpu::ShaderModuleDescriptor {
-            label: Some("master_fragment_shader"),
-            source: wgpu::util::make_spirv(&std::fs::read(compiled_fragment_shader_path.clone()).expect("Failed to read shader file")),
-        }
-    );
- 
-    // Create render pipeline
-   
+    // 5. Create shaders
+    compile_shader(vertex_shader_path.clone(), compiled_vertex_shader_path.clone());
+    let mut vertex_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("master_vertex_shader"),
+        source: wgpu::util::make_spirv(&std::fs::read(compiled_vertex_shader_path.clone()).expect("Failed to read shader file")),
+    });
+
+    compile_shader(fragment_shader_path.clone(), compiled_fragment_shader_path.clone());
+    let mut fragment_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("master_fragment_shader"),
+        source: wgpu::util::make_spirv(&std::fs::read(compiled_fragment_shader_path.clone()).expect("Failed to read shader file")),
+    });
+
+    // 6. Create render pipeline
     let mut render_pipeline = create_render_pipeline(&device, &pipeline_layout, &output_format, &vertex_shader, &fragment_shader);
 
+    // 7. Vertex buffer
     let vbo = device.create_buffer(&BufferDescriptor {
         label: None,
         size: size_of::<Vertex>() as u64 * 6,
         usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    queue.write_buffer(&vbo, 0, cast_slice(&*VERTICES));
 
-    // Render texture
+    // 8. Render texture
     let output_image_size = wgpu::Extent3d {
         width: output_size,
         height: output_size,
         depth_or_array_layers: 1,
     };
+
     let output_image_texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("Render Texture"),
         size: output_image_size,
@@ -259,18 +226,20 @@ fn main() {
         view_formats: &[],
     });
 
-    queue.write_buffer(&vbo, 0, cast_slice(&*VERTICES));
-
     if use_window {
         window.as_ref().unwrap().set_visible(true);
     }
     
+    // ------- Main loop -------
+
     let mut running = true;
+    let mut frame = 0;
+    let mut last_fps_update = Instant::now();
     
     while running {
         frame += 1;
 
-        // Window event handling
+        // Handling window events
         if use_window {
             running = handle_window_event(running, &mut event_loop, &device, &surface.as_ref().unwrap(), &mut surface_config.as_mut().unwrap());
         }
@@ -279,6 +248,13 @@ fn main() {
         let elapsed_time = start_time.elapsed().as_secs_f32();
         uniforms.time = elapsed_time;
         queue.write_buffer(&uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+
+        // FPS Calculation: Print FPS every second
+        if last_fps_update.elapsed() >= Duration::from_secs(1) {
+            println!("FPS: {}", frame);
+            frame = 0; // Reset counter
+            last_fps_update = Instant::now(); // Reset timer
+        }
 
         // Check for shader file changes
         if let Some(paths) = file_watcher.get_changes() {
@@ -291,72 +267,88 @@ fn main() {
                         label: Some("master_vertex_shader"),
                         source: wgpu::util::make_spirv(&std::fs::read(compiled_vertex_shader_path.clone()).expect("Failed to read shader file")),
                     });
-                    fragment_shader = fragment_shader;
                 } 
 
                 if (path.file_name().unwrap() == "master.frag")
                 {
                     compile_shader(fragment_shader_path.clone(), compiled_fragment_shader_path.clone());
-                    vertex_shader = vertex_shader;
                     fragment_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                         label: Some("master_fragment_shader"),
                         source: wgpu::util::make_spirv(&std::fs::read(compiled_fragment_shader_path.clone()).expect("Failed to read shader file")),
                     });
                 }    
             
+                // Recreate render pipeline with new shaders
                 render_pipeline = create_render_pipeline(&device, &pipeline_layout, &output_format.clone().into(), &vertex_shader, &fragment_shader);
             }
         }
 
-
-        let frame = if use_window { Some(surface.as_ref().unwrap().get_current_texture().expect("failed to get next swapchain texture")) } else { None };
-        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor { label: None });
-
-        {
-            let view = if use_window { 
-                &frame.as_ref().unwrap().texture.create_view(&TextureViewDescriptor::default())
-            } else { 
-                &output_image_texture.create_view(&wgpu::TextureViewDescriptor::default())
-            };
-
-            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: None,
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &view, 
-                    resolve_target: None,
-                    ops: Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: true,
-                    },
-                })],
-                depth_stencil_attachment: None,
-            });
-
-            render_pass.set_pipeline(&render_pipeline);
-            render_pass.set_vertex_buffer(0, vbo.slice(..));
-            render_pass.set_bind_group(0, &bind_group, &[]);
-            render_pass.draw(0..6, 0..1); 
-        }
-
-        queue.submit(once(encoder.finish()));
-        // let mut texture_data = read_texture(&device, &queue, &output_image_texture);
-        // save_as_png(texture_data, output_size, output_size, "output.png").unwrap();
-        // return;
-
-        #[cfg(target_os = "linux")]
-        {
-            if use_st7789
-            {
-                let mut texture_data = read_texture(&device, &queue, &output_image_texture);
-                let mut retain_counter = 0;
-                texture_data.retain(|_| { retain_counter += 1; retain_counter % 4 != 0 });
-                st7789.as_mut().unwrap().draw_raw(&texture_data, true).unwrap();
-            }
-        }
+        // Render to the window surface
+        if use_window {
+            let frame = surface.as_ref().unwrap().get_current_texture().expect("Failed to get next swapchain texture");
+            let view = frame.texture.create_view(&TextureViewDescriptor::default());
         
-        if use_window
-        {
-            frame.unwrap().present();
+            let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor { label: None });
+            
+            {
+                let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                    label: Some("Render Pass Window"),
+                    color_attachments: &[Some(RenderPassColorAttachment {
+                        view: &view, 
+                        resolve_target: None,
+                        ops: Operations {
+                            load: LoadOp::Clear(Color::BLACK),
+                            store: true,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                });
+        
+                render_pass.set_pipeline(&render_pipeline);
+                render_pass.set_vertex_buffer(0, vbo.slice(..));
+                render_pass.set_bind_group(0, &bind_group, &[]);
+                render_pass.draw(0..6, 0..1);
+            }
+        
+            queue.submit(once(encoder.finish()));
+            frame.present();
+        }
+
+        // Render to st7789
+        #[cfg(target_os = "linux")]
+        if use_st7789 {
+            let view = output_image_texture.create_view(&TextureViewDescriptor::default());
+
+            let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor { label: Some("Render Pass ST7789") });
+        
+            {
+                let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                    label: Some("Render Pass st7789"),
+                    color_attachments: &[Some(RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: Operations {
+                            load: LoadOp::Clear(Color::BLACK),
+                            store: true,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                });
+        
+                render_pass.set_pipeline(&render_pipeline);
+                render_pass.set_vertex_buffer(0, vbo.slice(..));
+                render_pass.set_bind_group(0, &bind_group, &[]);
+                render_pass.draw(0..6, 0..1);
+            }
+        
+            queue.submit(once(encoder.finish()));
+        
+            // 250 FPS
+            let mut texture_data = read_texture(&device, &queue, &output_image_texture); // -100 FPS
+            let mut retain_counter = 0;
+            texture_data.retain(|_| { retain_counter += 1; retain_counter % 4 != 0 }); // -30 FPS
+        
+            st7789.as_mut().unwrap().draw_raw(&texture_data, true).unwrap();
         }
     }
 }
@@ -384,7 +376,7 @@ fn initialize_wgpu_no_window() -> (wgpu::Device, wgpu::Queue, Option<wgpu::Surfa
     (device, queue, None, None, TextureFormat::Rgba8Unorm)
 }
 
-fn initialize_wgpu(window: &winit::window::Window) -> (wgpu::Device, wgpu::Queue, Option<wgpu::Surface>, Option<wgpu::SurfaceConfiguration>, wgpu::TextureFormat) {
+fn initialize_wgpu_with_window(window: &winit::window::Window) -> (wgpu::Device, wgpu::Queue, Option<wgpu::Surface>, Option<wgpu::SurfaceConfiguration>, wgpu::TextureFormat) {
     let physical_size = window.inner_size();
 
     let instance = Instance::default();
@@ -470,6 +462,56 @@ fn handle_window_event(
     return running;
 }
 
+fn compile_shader(shader_path: PathBuf, output_path: PathBuf) {
+    if cfg!(target_os = "windows") {
+        let status: std::process::ExitStatus = Command::new("./glslc.exe")
+            .arg(shader_path.to_str().unwrap())
+            .arg("-o")
+            .arg(output_path)
+            .status()
+            .expect("Failed to execute glslc");
+        if !status.success() {
+            panic!("Shader compilation failed for {}", shader_path.to_str().unwrap());
+        }
+    } else {
+        let status: std::process::ExitStatus = Command::new("glslc")
+            .arg(shader_path.to_str().unwrap())
+            .arg("-o")
+            .arg(output_path)
+            .status()
+            .expect("Failed to execute glslc");
+        if !status.success() {
+            panic!("Shader compilation failed for {}", shader_path.to_str().unwrap());
+        }
+    }
+}
+
+fn create_render_pipeline(device: &Device, pipeline_layout: &PipelineLayout, output_format: &TextureFormat, vertex_shader: &ShaderModule, fragment_shader: &ShaderModule) -> RenderPipeline
+{
+    return device.create_render_pipeline(&RenderPipelineDescriptor {
+        label: None,
+        layout: Some(&pipeline_layout),
+        vertex: VertexState {
+            module: &vertex_shader,
+            entry_point: "main",
+            buffers: &[Vertex::layout()],
+        },
+        primitive: PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        fragment: Some(FragmentState {
+            module: &fragment_shader,
+            entry_point: "main",
+            targets: &[Some(ColorTargetState {
+                format: *output_format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview: None,
+    });
+}
+
 fn create_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
     let texture_size = wgpu::Extent3d {
         width,
@@ -489,6 +531,7 @@ fn create_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Textu
     })
 }
 
+// Copies data from a texture to array of bytes
 fn read_texture(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) -> Vec<u8> {
     let texture_size = texture.size();
     let data_size = (texture_size.width * texture_size.height * 4) as usize; // 4 for RGBA

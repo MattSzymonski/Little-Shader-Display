@@ -120,11 +120,11 @@ impl RaspberryST7789Driver {
 
     // Important: This code handles only 8-bit images with 3 channels! In photopea scale image then save it as raw with the same dimensions
     pub fn draw_raw(&mut self, image_bytes: &[u8], is_bgr: bool) -> Result<(), Box<dyn Error>> {
-        let rgb565_data = pack_888_to_rgb565(&image_bytes, is_bgr); 
-        let rgb565_data_split = rgb565_to_u8(&rgb565_data);
-        let raw_image: ImageRawLE<Rgb565> = ImageRawLE::new(&rgb565_data_split, (rgb565_data.len() as f32).sqrt() as u32);
-        let image = Image::new(&raw_image, Point::new(-50, 0));
-        image.draw(&mut self.display);
+        let rgb565_data = pack_888_to_rgb565(&image_bytes, is_bgr); // -15 FPS
+        let rgb565_data_split = rgb565_to_u8(&rgb565_data); // -20 FPS
+        let raw_image: ImageRawLE<Rgb565> = ImageRawLE::new(&rgb565_data_split, (rgb565_data.len() as f32).sqrt() as u32); // -2 FPS
+        let image = Image::new(&raw_image, Point::new(-50, 0)); // -1 FPS
+        image.draw(&mut self.display); // -80 FPS
         //self.display.flush()?;
         Ok(())
     }
