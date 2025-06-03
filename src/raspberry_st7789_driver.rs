@@ -5,11 +5,9 @@ use std::time::Duration;
 use display_interface_spi::SPIInterfaceNoCS;
 use embedded_graphics::image::{Image, ImageRawLE};
 use embedded_graphics::pixelcolor::Rgb565;
-use embedded_graphics::prelude::{Point, RgbColor, Transform};
-use embedded_graphics::primitives::{Circle, PrimitiveStyle};
+use embedded_graphics::prelude::{Point, RgbColor};
 use rppal::gpio::Gpio;
 use rppal::spi::{Bus, Mode, SlaveSelect, Spi};
-use rppal::system::DeviceInfo;
 use st7789::{Orientation, ST7789};
 use embedded_hal::digital::v2::OutputPin as EmbeddedOutputPin;
 use rppal::gpio::OutputPin as RppalOutputPin;
@@ -117,52 +115,38 @@ impl RaspberryST7789Driver {
         //self.display.flush()?;
         Ok(())
     }
-
-    // Important: This code handles only 8-bit images with 3 channels! In photopea scale image then save it as raw with the same dimensions
-    pub fn draw_raw(&mut self, image_bytes: &[u8], is_bgr: bool) -> Result<(), Box<dyn Error>> {
-        let rgb565_data = pack_888_to_rgb565(&image_bytes, is_bgr); // -15 FPS
-        let rgb565_data_split = rgb565_to_u8(&rgb565_data); // -20 FPS
-        let raw_image: ImageRawLE<Rgb565> = ImageRawLE::new(&rgb565_data_split, (rgb565_data.len() as f32).sqrt() as u32); // -2 FPS
-        let image = Image::new(&raw_image, Point::new(-50, 0)); // -1 FPS
-        image.draw(&mut self.display); // -80 FPS
-        //self.display.flush()?;
+    
+    pub fn draw_raw(&mut self, image_bytes: &[u8]) -> Result<(), Box<dyn Error>> {
+        // Convert RGBA8888 to RGB565 (LE packed bytes)
+        let rgb565_bytes = rgba8888_to_rgb565_u8(image_bytes);
+    
+        // Compute square side size from byte count
+        let dim = (rgb565_bytes.len() / 2) as u32;
+        let side = (dim as f32).sqrt() as u32;
+    
+        let raw_image: ImageRawLE<Rgb565> = ImageRawLE::new(&rgb565_bytes, side);
+        let image = Image::new(&raw_image, Point::new(-50, 60));
+        
+        image.draw(&mut self.display);
         Ok(())
     }
+
 }
 
-// If brga is false then rgb is used
-fn pack_888_to_rgb565(input: &[u8], is_bgr: bool) -> Vec<u16> {
-    let mut output: Vec<u16> = Vec::new();
-    
-    for chunk in input.chunks(3) {
-        let (r, g, b) = match chunk {
-            [r, g, b] => { if is_bgr { (*b, *g, *r) } else {  (*r, *g, *b) } }
-            [r, g] => { if is_bgr { (*g, 0, *r) } else { (*r, *g, 0) } }
-            [r] => { if is_bgr { (0, 0, *r) } else { (*r, 0, 0)  } }
-            _ => (0, 0, 0),  // Default case
-        };
-        
-        // Convert 3 u8 color values to rgb565 packed into a single u16
-        let r_5 = (r >> 3) & 0x1F;  // 5 bits for red
-        let g_6 = (g >> 2) & 0x3F;  // 6 bits for green
-        let b_5 = (b >> 3) & 0x1F;  // 5 bits for blue
+// Converts RGBA8888 (4 bytes per pixel) to RGB565 (2 bytes per pixel, little-endian)
+// Skips the alpha channel entirely.
+fn rgba8888_to_rgb565_u8(input: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity((input.len() / 4) * 2); // 2 bytes per pixel (RGB565)
 
-        // Combine into a single 16-bit value
-        let result = (((r_5 as u16) << 11) | ((g_6 as u16) << 5) | b_5 as u16);
-        output.push(result);
+    for chunk in input.chunks_exact(4) {
+        let rgb565: u16 =
+            ((chunk[0] as u16 & 0xF8) << 8) | // Red: upper 5 bits
+            ((chunk[1] as u16 & 0xFC) << 3) | // Green: upper 6 bits
+            ((chunk[2] as u16) >> 3);         // Blue: upper 5 bits
+
+        output.push((rgb565 & 0xFF) as u8);      // Low byte
+        output.push((rgb565 >> 8) as u8);        // High byte
     }
 
     output
-}
-
-fn rgb565_to_u8(rgb565_data: &[u16]) -> Vec<u8> {
-    let mut byte_data = Vec::with_capacity(rgb565_data.len() * 2); // Each u16 will be converted to 2 u8 values
-    for &rgb565 in rgb565_data {
-        let lower_byte = (rgb565 & 0xFF) as u8; // Lower byte
-        let upper_byte = (rgb565 >> 8) as u8; // Upper byte
-        byte_data.push(lower_byte);
-        byte_data.push(upper_byte);
-    }
-
-    byte_data
 }

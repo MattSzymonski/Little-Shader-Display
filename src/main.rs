@@ -6,65 +6,34 @@ mod raspberry_st7789_driver;
 
 // --- Standard and external library imports ---
 use std::{
-    env, 
-    fs, 
-    iter::{self, once}, 
-    mem::{self, size_of}, 
-    path::PathBuf, 
-    process::Command, 
-    sync::LazyLock, 
-    time::{Duration}
+    env, fs,
+    iter::{self, once},
+    mem::{size_of},
+    path::{Path, PathBuf},
+    process::Command,
+    sync::LazyLock,
+    time::{Duration, Instant},
 };
-use std::time::Instant;
-use bytemuck::cast_slice;
+
+use bytemuck::{cast_slice};
 use bytemuck_derive::{Pod, Zeroable};
 use file_watcher::FileWatcher;
 use futures::executor::block_on;
 use image::{ImageBuffer, Rgba};
-use wgpu::{
-    util::DeviceExt, 
-    BufferDescriptor, 
-    BufferUsages, 
-    Color, 
-    ColorTargetState, 
-    CommandEncoderDescriptor,
-    Device, 
-    DeviceDescriptor, 
-    Features, 
-    FragmentState, 
-    LoadOp, 
-    MultisampleState, 
-    Operations,
-    PipelineLayout, 
-    PipelineLayoutDescriptor,
-    PresentMode, 
-    PrimitiveState,
-    RenderPassColorAttachment, 
-    RenderPassDescriptor, 
-    RenderPipeline, 
-    RenderPipelineDescriptor, 
-    RequestAdapterOptions, 
-    ShaderModule, 
-    ShaderModuleDescriptor, 
-    SurfaceConfiguration, 
-    TextureFormat, 
-    TextureUsages, 
-    TextureViewDescriptor,
-    VertexAttribute, 
-    VertexBufferLayout,
-    VertexFormat, 
-    VertexState, 
-    VertexStepMode
-};
-use std::path::Path;
+use wgpu::util::DeviceExt;
 use winit::{
     dpi::LogicalSize,
-    event::{Event, WindowEvent, KeyboardInput, VirtualKeyCode, ElementState},
+    event::{Event, WindowEvent},
     event_loop::{EventLoop},
     platform::run_return::EventLoopExtRunReturn,
     window::{Window, WindowBuilder},
 };
+use std::io::Read;
+use std::fs::File;
+use std::os::unix::io::AsRawFd;
+use libc::{fcntl, F_GETFL, F_SETFL, O_NONBLOCK};
 
+const SHADER_NAMES: [&str; 2] = ["circle.frag", "waves.frag"];
 
 // --- Data Structures for Rendering ---
 
@@ -90,28 +59,27 @@ struct Vertex {
 }
 
 impl Vertex {
-    // Creates a new vertex with given position and texture coordinates.
+    // Creates a new vertex with given position and texture coordinates
     fn new(x: f32, y: f32, u: f32, v: f32) -> Self {
         Self { position: [x, y], texture_coordinates: [u, v] }
     }
 
-    // Returns the layout description for the vertex buffer.
-    fn layout() -> VertexBufferLayout<'static> {
-        VertexBufferLayout {
+    fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
             array_stride: size_of::<Vertex>() as u64,
-            step_mode: VertexStepMode::Vertex,
+            step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
                 // Position attribute: location 0
-                VertexAttribute { 
-                    format: VertexFormat::Float32x2,
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
                     offset: 0,
                     shader_location: 0,
                 },
                 // Texture coordinate attribute: location 1
-                VertexAttribute { // Vertex texture coordinates
-                    offset: mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                    shader_location: 1,
+                wgpu::VertexAttribute {
                     format: wgpu::VertexFormat::Float32x2,
+                    offset: size_of::<[f32; 2]>() as u64,
+                    shader_location: 1,
                 },
             ],
         }
@@ -134,6 +102,8 @@ static VERTICES: LazyLock<[Vertex; 6]> = LazyLock::new(|| [
 fn main() {
     let mut use_window = false;
     let mut use_st7789 = false;
+
+    let mut current_shader_index = 0;
     
     // Parse command-line arguments
     let args: Vec<String> = env::args().collect();
@@ -160,11 +130,9 @@ fn main() {
     if !use_window && !use_st7789 && cfg!(target_os = "linux") {
         panic!("No display chosen for Linux");
     }
-    
+
     let output_size: u32 = 256;
     let shaders_path = env::current_dir().unwrap().join("res").join("shaders");
-    let vertex_shader_path = shaders_path.join("master.vert");
-    let fragment_shader_path = shaders_path.join("master.frag");
     let compiled_vertex_shader_path = shaders_path.join("compiled").join("master.vert.spv");
     let compiled_fragment_shader_path = shaders_path.join("compiled").join("master.frag.spv");
 
@@ -182,7 +150,7 @@ fn main() {
     let mut event_loop = EventLoop::new(); 
     let window: Option<Window> = if use_window {
         let window = WindowBuilder::new()
-            .with_inner_size(LogicalSize::new(1280, 720))
+            .with_inner_size(LogicalSize::new(500, 500))
             .with_title("Little Shader Display")
             .with_visible(true) // Make visible directly
             .build(&event_loop)
@@ -193,7 +161,7 @@ fn main() {
     };
 
     // Create a file watcher to monitor shader files for changes
-    let mut file_watcher = FileWatcher::new(env::current_dir().unwrap().join(shaders_path));
+    let mut file_watcher = FileWatcher::new(env::current_dir().unwrap().join(shaders_path.clone().join("uncompiled")));
     let start_time = Instant::now();
 
     // --- Create GPU resources for rendering ---
@@ -238,20 +206,20 @@ fn main() {
     });
 
     // 5. Define pipeline layout with uniform bindings
-    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: None,
         bind_group_layouts: &[&bind_group_layout],
         push_constant_ranges: &[],
     });
 
     // 6. Compile and create shaders
-    compile_shader(vertex_shader_path.clone(), compiled_vertex_shader_path.clone());
+    compile_shader(shaders_path.clone().join("uncompiled").join("master.vert").clone(), compiled_vertex_shader_path.clone());
     let mut vertex_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("master_vertex_shader"),
         source: wgpu::util::make_spirv(&std::fs::read(compiled_vertex_shader_path.clone()).expect("Failed to read shader file")),
     });
 
-    compile_shader(fragment_shader_path.clone(), compiled_fragment_shader_path.clone());
+    compile_shader(shaders_path.clone().join("uncompiled").join(SHADER_NAMES[current_shader_index]).clone(), compiled_fragment_shader_path.clone());
     let mut fragment_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("master_fragment_shader"),
         source: wgpu::util::make_spirv(&std::fs::read(compiled_fragment_shader_path.clone()).expect("Failed to read shader file")),
@@ -261,10 +229,10 @@ fn main() {
     let mut render_pipeline = create_render_pipeline(&device, &pipeline_layout, &output_format, &vertex_shader, &fragment_shader);
 
     // 8. Upload vertex buffer data
-    let vbo = device.create_buffer(&BufferDescriptor {
+    let vbo = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
         size: size_of::<Vertex>() as u64 * 6,
-        usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     queue.write_buffer(&vbo, 0, cast_slice(&*VERTICES));
@@ -303,61 +271,84 @@ fn main() {
         (None, None)
     };
 
-    // ------- Main loop -------
+    // --- Main loop ---
 
     let mut running = true;
     let mut frame = 0;
     let mut last_fps_update = Instant::now();
     
+    // Setup non-blocking stdin reading to detect user input 
+    let stdin = File::open("/dev/stdin").unwrap();
+    let fd = stdin.as_raw_fd();
+    let flags = unsafe { fcntl(fd, F_GETFL) };
+    unsafe { fcntl(fd, F_SETFL, flags | O_NONBLOCK) };
+
     while running {
         frame += 1;
 
         // 1. Handle window events
         if use_window {
-            running = handle_window_event(running, &mut event_loop, &device, &surface.as_ref().unwrap(), &mut surface_config.as_mut().unwrap());
+            running = handle_window_event(
+                running, 
+                &mut event_loop, 
+                &device, 
+                &surface.as_ref().unwrap(), 
+                &mut surface_config.as_mut().unwrap(),
+            );
         }
 
-        // 2. Calculate elapsed time
+        // 2. Handle user input to switch shaders
+        let mut force_recreate_shaders = false;
+        let mut buf = [0u8; 1];
+        if stdin.try_clone().unwrap().read(&mut buf).is_ok() {
+            if buf[0] == b' ' {
+                current_shader_index = (current_shader_index + 1) % 2;
+                println!("Switched to shader index: {}", current_shader_index);
+                force_recreate_shaders = true; 
+            }
+        }
+
+        // 3. Calculate elapsed time
         let elapsed_time = start_time.elapsed().as_secs_f32();
         uniforms.time = elapsed_time;
         queue.write_buffer(&uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
 
-        // FPS Calculation: Print FPS every second
+        // 4. FPS Calculation: Print FPS every second
         if last_fps_update.elapsed() >= Duration::from_secs(1) {
             println!("FPS: {}", frame);
             frame = 0; // Reset counter
             last_fps_update = Instant::now(); // Reset timer
         }
 
-        // 3. Check for shader file changes, recompile them and recreate pipeline if necessary
+        // 5. Check for shader file changes, recompile them and recreate pipeline if necessary
         check_and_reload_shaders(
             &mut file_watcher,
             &device,
             &pipeline_layout,
             &output_format,
-            &vertex_shader_path,
+            &shaders_path.join("uncompiled").join("master.vert").clone(),
             &compiled_vertex_shader_path,
-            &fragment_shader_path,
+            &shaders_path.join("uncompiled").join(SHADER_NAMES[current_shader_index]).clone(),
             &compiled_fragment_shader_path,
             &mut vertex_shader,
             &mut fragment_shader,
             &mut render_pipeline,
+            force_recreate_shaders
         );
 
-        // 4. Option: Render to the window surface
+        // 6a. Option: Render to the window surface
         if use_window {
             render_to_window(
                 &device,
                 &queue,
                 surface.as_ref().unwrap(),
-                surface_config.as_ref().unwrap(),
                 &render_pipeline,
                 &vbo,
                 &bind_group,
             );
         }
 
-        // 5. Option: Render to the ST7789 display
+        // 6b. Option: Render to the ST7789 display
         #[cfg(target_os = "linux")]
         if use_st7789 {
             render_to_st7789(
@@ -399,7 +390,7 @@ fn initialize_wgpu_no_window() -> (wgpu::Device, wgpu::Queue, Option<wgpu::Surfa
     ))
     .expect("Failed to create device");
 
-    (device, queue, None, None, TextureFormat::Rgba8Unorm)
+    (device, queue, None, None, wgpu::TextureFormat::Rgba8Unorm)
 }
 
 fn initialize_wgpu_with_window(window: &winit::window::Window) -> (wgpu::Device, wgpu::Queue, Option<wgpu::Surface>, Option<wgpu::SurfaceConfiguration>, wgpu::TextureFormat) {
@@ -413,7 +404,7 @@ fn initialize_wgpu_with_window(window: &winit::window::Window) -> (wgpu::Device,
     let surface = unsafe { instance.create_surface(&window) }.expect("failed to create surface");
 
     // Create addapter with the surface
-    let adapter = block_on(instance.request_adapter(&RequestAdapterOptions {
+    let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         force_fallback_adapter: false,
         compatible_surface: Some(&surface),
@@ -423,9 +414,9 @@ fn initialize_wgpu_with_window(window: &winit::window::Window) -> (wgpu::Device,
 
     // Create device and queue
     let (device, queue) = block_on(adapter.request_device(
-        &DeviceDescriptor {
+        &wgpu::DeviceDescriptor {
             label: None,
-            features: Features::empty(),
+            features: wgpu::Features::empty(),
             limits: adapter.limits(),
         },
         None,
@@ -434,31 +425,23 @@ fn initialize_wgpu_with_window(window: &winit::window::Window) -> (wgpu::Device,
 
     // Configure the surface with the adapter and window size
     let swapchain_capabilities = surface.get_capabilities(&adapter);
-    let swapchain_format = if swapchain_capabilities.formats.contains(&TextureFormat::Rgba8Unorm)
-    {
-        TextureFormat::Rgba8Unorm
-    } 
-    else if swapchain_capabilities.formats.contains(&TextureFormat::Bgra8Unorm)
-    {
-        TextureFormat::Bgra8Unorm
-    } 
-    else 
-    {
-        swapchain_capabilities.formats[0]
-    };
+    let swapchain_format = wgpu::TextureFormat::Rgba8Unorm;
 
-    let surface_config: wgpu::SurfaceConfiguration = SurfaceConfiguration {
-        usage: TextureUsages::RENDER_ATTACHMENT,
+    // Create a surface configuration with the selected format and window size
+    let surface_config: wgpu::SurfaceConfiguration = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format: swapchain_format,
         width: physical_size.width,
         height: physical_size.height,
-        present_mode: PresentMode::Fifo,
+        present_mode: wgpu::PresentMode::Fifo,
         alpha_mode: swapchain_capabilities.alpha_modes[0],
         view_formats: Vec::new(),
     };
 
+    // Apply the surface configuration to the surface
     surface.configure(&device, &surface_config);
 
+    // Return the device, queue, surface, surface configuration, and swapchain format
     (device, queue, Some(surface), Some(surface_config), swapchain_format)
 }
 
@@ -467,7 +450,7 @@ fn handle_window_event(
     event_loop: &mut EventLoop<()>,
     device: &wgpu::Device,
     surface: &wgpu::Surface,
-    surface_config: &mut SurfaceConfiguration,
+    surface_config: &mut wgpu::SurfaceConfiguration,
 ) -> bool {
     let mut running: bool = running;
 
@@ -487,13 +470,6 @@ fn handle_window_event(
                     surface_config.height = new_inner_size.height;
                     surface.configure(&device, &surface_config);
                 }
-                WindowEvent::KeyboardInput { input, .. } => {
-                    if let Some(keycode) = input.virtual_keycode {
-                        if keycode == VirtualKeyCode::Space && input.state == ElementState::Pressed {
-                            println!("Spacebar pressed!");
-                        }
-                    }
-                }
                 _ => (),
             },
             Event::MainEventsCleared => control_flow.set_exit(),
@@ -505,6 +481,7 @@ fn handle_window_event(
 }
 
 fn compile_shader(shader_path: PathBuf, output_path: PathBuf) {
+    println!("Compiling shader: {}", shader_path.to_str().unwrap());
     if cfg!(target_os = "windows") {
         let status: std::process::ExitStatus = Command::new("./glslc.exe")
             .arg(shader_path.to_str().unwrap())
@@ -528,23 +505,30 @@ fn compile_shader(shader_path: PathBuf, output_path: PathBuf) {
     }
 }
 
-fn create_render_pipeline(device: &Device, pipeline_layout: &PipelineLayout, output_format: &TextureFormat, vertex_shader: &ShaderModule, fragment_shader: &ShaderModule) -> RenderPipeline
+fn create_render_pipeline(
+    device: &wgpu::Device, 
+    pipeline_layout: &wgpu::PipelineLayout, 
+    output_format: &wgpu::TextureFormat, 
+    vertex_shader: &wgpu::ShaderModule, 
+    fragment_shader: &wgpu::ShaderModule
+) -> wgpu::RenderPipeline
 {
-    return device.create_render_pipeline(&RenderPipelineDescriptor {
+    // Create the render pipeline using the provided shaders and pipeline layout
+    return device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: None,
         layout: Some(&pipeline_layout),
-        vertex: VertexState {
+        vertex: wgpu::VertexState {
             module: &vertex_shader,
             entry_point: "main",
             buffers: &[Vertex::layout()],
         },
-        primitive: PrimitiveState::default(),
+        primitive: wgpu::PrimitiveState::default(),
         depth_stencil: None,
-        multisample: MultisampleState::default(),
-        fragment: Some(FragmentState {
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
             module: &fragment_shader,
             entry_point: "main",
-            targets: &[Some(ColorTargetState {
+            targets: &[Some(wgpu::ColorTargetState {
                 format: *output_format,
                 blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
@@ -558,7 +542,6 @@ fn render_to_window(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     surface: &wgpu::Surface,
-    surface_config: &wgpu::SurfaceConfiguration,
     render_pipeline: &wgpu::RenderPipeline,
     vbo: &wgpu::Buffer,
     bind_group: &wgpu::BindGroup,
@@ -567,20 +550,20 @@ fn render_to_window(
     let frame = surface.get_current_texture().expect("Failed to get next swapchain texture");
 
     // Create a texture view for the frame
-    let view = frame.texture.create_view(&TextureViewDescriptor::default());
+    let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
     // Create a command encoder to record the rendering commands
-    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor { label: Some("Window Render Encoder") });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Window Render Encoder") });
 
     {
         // Begin a render pass to draw to the window surface
-        let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Window Render Pass"),
-            color_attachments: &[Some(RenderPassColorAttachment {
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &view,
                 resolve_target: None,
-                ops: Operations {
-                    load: LoadOp::Clear(Color::BLACK),
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                     store: true,
                 },
             })],
@@ -612,101 +595,114 @@ fn render_to_st7789(
     buffer: &wgpu::Buffer,
     st7789: &mut raspberry_st7789_driver::RaspberryST7789Driver,
 ) {
-    let view = output_image_texture.create_view(&TextureViewDescriptor::default());
-    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-        label: Some("ST7789 Render Encoder"),
-    });
+    // Create a texture view for the frame
+    let view = output_image_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // Create a command encoder to record the rendering commands
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ST7789 Render Encoder") });
 
     {
-        let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+        // Begin a render pass to draw to the ST7789 texture
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("ST7789 Render Pass"),
-            color_attachments: &[Some(RenderPassColorAttachment {
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &view,
                 resolve_target: None,
-                ops: Operations {
-                    load: LoadOp::Clear(Color::BLACK),
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                     store: true,
                 },
             })],
             depth_stencil_attachment: None,
         });
 
+        // Set the render pipeline and bind group, then draw the vertices
         render_pass.set_pipeline(render_pipeline);
         render_pass.set_vertex_buffer(0, vbo.slice(..));
         render_pass.set_bind_group(0, bind_group, &[]);
         render_pass.draw(0..6, 0..1);
     }
 
+    // Submit the command encoder to the queue
     queue.submit(once(encoder.finish()));
 
-    let mut texture_data = read_texture(device, queue, output_image_texture, buffer);
-    let mut retain_counter = 0;
-    texture_data.retain(|_| {
-        retain_counter += 1;
-        retain_counter % 4 != 0
-    });
+    // Read the texture data into a array
+    let texture_data = read_texture(device, queue, output_image_texture, buffer);
 
-    st7789.draw_raw(&texture_data, true).unwrap();
+    // Draw the texture data to the ST7789 display
+    st7789.draw_raw(&texture_data).unwrap();
 }
 
 fn check_and_reload_shaders(
     file_watcher: &mut FileWatcher,
     device: &wgpu::Device,
     pipeline_layout: &wgpu::PipelineLayout,
-    output_format: &TextureFormat,
+    output_format: &wgpu::TextureFormat,
     vertex_shader_path: &PathBuf,
     compiled_vertex_shader_path: &PathBuf,
     fragment_shader_path: &PathBuf,
     compiled_fragment_shader_path: &PathBuf,
-    vertex_shader: &mut ShaderModule,
-    fragment_shader: &mut ShaderModule,
-    render_pipeline: &mut RenderPipeline,
+    vertex_shader: &mut wgpu::ShaderModule,
+    fragment_shader: &mut wgpu::ShaderModule,
+    render_pipeline: &mut wgpu::RenderPipeline,
+    force: bool,
 ) {
-    if let Some(paths) = file_watcher.get_changes() {
-        for path in paths {
-            println!("Shader change detected: {:?}", path);
-            let file_name = path.file_name().unwrap();
+    let mut changed = force;
 
-            if file_name == "master.vert" {
+    if force {
+        println!("Force reload: recompiling both shaders.");
+        compile_shader(vertex_shader_path.clone(), compiled_vertex_shader_path.clone());
+        *vertex_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("master_vertex_shader"),
+            source: wgpu::util::make_spirv(&fs::read(compiled_vertex_shader_path).expect("Failed to read vertex shader")),
+        });
+
+        compile_shader(fragment_shader_path.clone(), compiled_fragment_shader_path.clone());
+        *fragment_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("master_fragment_shader"),
+            source: wgpu::util::make_spirv(&fs::read(compiled_fragment_shader_path).expect("Failed to read fragment shader")),
+        });
+    } else if let Some(paths) = file_watcher.get_changes() {
+        for path in paths {
+            let file_name = path.file_name().unwrap();
+            println!("Shader change detected: {:?}. Name: {:?}", path, file_name);
+
+            if file_name.to_str().unwrap().ends_with(".vert") {
+                println!("Recompiling vertex shader: {:?}", path);
                 compile_shader(vertex_shader_path.clone(), compiled_vertex_shader_path.clone());
-                *vertex_shader = device.create_shader_module(ShaderModuleDescriptor {
+                *vertex_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("master_vertex_shader"),
                     source: wgpu::util::make_spirv(&fs::read(compiled_vertex_shader_path).expect("Failed to read vertex shader")),
                 });
+                changed = true;
             }
 
-            if file_name == "master.frag" {
+            if file_name.to_str().unwrap().ends_with(".frag") {
+                println!("Recompiling fragment shader: {:?}", path);
                 compile_shader(fragment_shader_path.clone(), compiled_fragment_shader_path.clone());
-                *fragment_shader = device.create_shader_module(ShaderModuleDescriptor {
+                *fragment_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("master_fragment_shader"),
                     source: wgpu::util::make_spirv(&fs::read(compiled_fragment_shader_path).expect("Failed to read fragment shader")),
                 });
+                changed = true;
             }
-
-            *render_pipeline = create_render_pipeline(
-                device,
-                pipeline_layout,
-                output_format,
-                vertex_shader,
-                fragment_shader,
-            );
         }
+    }
+
+    if changed {
+        *render_pipeline = create_render_pipeline(
+            device,
+            pipeline_layout,
+            output_format,
+            vertex_shader,
+            fragment_shader,
+        );
     }
 }
 
 // Copies data from a texture to array of bytes
 fn read_texture(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture, buffer: &wgpu::Buffer) -> Vec<u8> {
     let texture_size = texture.size();
-    let data_size = (texture_size.width * texture_size.height * 4) as usize; // 4 for RGBA
-    // let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-    //     label: Some("Read Buffer"),
-    //     size: data_size as u64,
-    //     usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-    //     mapped_at_creation: false,
-    // });
-
-    //queue.write_buffer(&buffer, 0, &vec![0; data_size]);
-
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("Read Texture Encoder"),
     });
@@ -748,10 +744,6 @@ fn read_texture(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Text
         }
         std::thread::sleep(std::time::Duration::from_millis(1)); // Small sleep to reduce CPU usage
     }
-
-
-    // device.poll(wgpu::Maintain::Wait);
-    // rx.recv().unwrap();
 
     // Retrieve the data
     let data = buffer_slice.get_mapped_range();

@@ -5,23 +5,13 @@
 cargo build --release --target aarch64-unknown-linux-gnu
 
 echo -e "Copying shaders to Raspberry Pi..."
-# scp ./res/shaders/master.frag \
-#     ./res/shaders/master.vert \
-#     mattszymonski@192.168.33.17:/home/mattszymonski/programming/shader-editor-rs/res/shaders/
-
-
-# scp ./res/shaders/compiled/master.frag.spv \
-#     ./res/shaders/compiled/master.vert.spv \
-#     mattszymonski@192.168.33.17:/home/mattszymonski/programming/shader-editor-rs/res/shaders/compiled/
-
-
+sshpass -p "ras" scp -rp ./res mattszymonski@192.168.33.17:/home/mattszymonski/programming/little-shader-display/
 
 echo -e "Copying binary to Raspberry Pi..."
-sshpass -p "ras" scp ./target/aarch64-unknown-linux-gnu/release/little-shader-display \
-    mattszymonski@192.168.33.17:/home/mattszymonski/programming/little-shader-display/
+sshpass -p "ras" scp ./target/aarch64-unknown-linux-gnu/release/little-shader-display mattszymonski@192.168.33.17:/home/mattszymonski/programming/little-shader-display/
 
 echo -e "Running little-shader-display..."
-sshpass -p 'ras' ssh mattszymonski@192.168.33.17 "/usr/bin/screen -S mysession -X stuff '/home/mattszymonski/programming/little-shader-display/little-shader-display -- --window\n'"
+sshpass -p 'ras' ssh mattszymonski@192.168.33.17 "/usr/bin/screen -S mysession -X stuff '/home/mattszymonski/programming/little-shader-display/little-shader-display -- --st7789\n'"
 
 
 
