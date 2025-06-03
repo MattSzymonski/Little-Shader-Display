@@ -100,7 +100,7 @@ impl RaspberryST7789Driver {
         let cs_pin = RaspberryDelayOutputPin::new(gpio.get(CS_PIN_NUMBER)?.into_output());
         let bl_pin = RaspberryDelayOutputPin::new(gpio.get(BL_PIN_NUMBER)?.into_output());
         
-        let spi = RaspberrySpi::new(Spi::new(Bus::Spi0, SlaveSelect::Ss0, 16_000_000, Mode::Mode0)?);
+        let spi = RaspberrySpi::new(Spi::new(Bus::Spi0, SlaveSelect::Ss0, 64_000_000, Mode::Mode0)?);
         let display_interface = SPIInterfaceNoCS::new(spi, dc_pin);
         let display = ST7789::new(display_interface, rst_pin, 240, 280);
     
