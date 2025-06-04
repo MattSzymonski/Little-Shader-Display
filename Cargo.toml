@@ -8,6 +8,8 @@ name = "little-shader-display"
 path = "./src/main.rs"
 
 [dependencies]
+
+# For renderer
 bytemuck = "1.13.1"
 bytemuck_derive = "1.4.1"
 futures = "0.3.28"
@@ -15,6 +17,12 @@ wgpu = { version = "0.16.0", features = [ "spirv" ] }
 winit = "0.28.6"
 image = "0.25.2"
 libc = "0.2"
+
+# For bluetooth server
+bluer = { version = "0.17.3", features = ["full"] }
+tokio = { version = "1", features = [ "io-std", "io-util", "rt-multi-thread", "signal", "net"] }
+tokio-stream = { version = "0.1", optional = true }
+env_logger = "0.11"
 
 # ST7789
 [target.'cfg(target_os = "linux")'.dependencies]

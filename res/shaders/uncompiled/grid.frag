@@ -7,6 +7,8 @@ layout(location = 1) in vec2 vertex_texture_coordinates;
 // Uniforms
 layout(set = 0, binding = 0) uniform Uniforms {
     float time;
+    vec3 bluetooth_data;
+    float screen_aspect_ratio;
 };
 
 // Output fragment color
@@ -20,12 +22,10 @@ void main() {
     // Convert UV to [-1, 1] space centered around screen
     vec2 uv = vertex_texture_coordinates * 2.0 - 1.0;
 
-    // Handle aspect ratio manually (assume screen is wider than tall for demonstration)
-    float aspect = 16.0 / 9.0; // Replace with actual resolution ratio if dynamic
-    uv.x *= aspect;
+    uv.x *= screen_aspect_ratio;
 
-    // Static center of ripple (middle of screen for now)
-    vec2 center = vec2(0.0);
+    // Apply bluetooth_data.xy as an offset to the center position
+    vec2 center = bluetooth_data.xy;
 
     // Distance from center
     float distance = length(uv - center);

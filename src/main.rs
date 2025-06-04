@@ -1,17 +1,18 @@
 // --- Module declarations and conditional compilation for platform-specific drivers ---
 mod file_watcher;
+mod bluetooth_server;
 
 #[cfg(target_os = "linux")]
-mod raspberry_st7789_driver;
+mod st7789_driver;
 
 // --- Standard and external library imports ---
 use std::{
     env, fs,
     iter::{self, once},
-    mem::{size_of},
+    mem::size_of,
     path::{Path, PathBuf},
     process::Command,
-    sync::LazyLock,
+    sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
 
@@ -20,6 +21,7 @@ use bytemuck_derive::{Pod, Zeroable};
 use file_watcher::FileWatcher;
 use futures::executor::block_on;
 use image::{ImageBuffer, Rgba};
+use tokio::sync::Mutex;
 use wgpu::util::DeviceExt;
 use winit::{
     dpi::LogicalSize,
@@ -32,21 +34,27 @@ use std::io::Read;
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use libc::{fcntl, F_GETFL, F_SETFL, O_NONBLOCK};
+use bluetooth_server::BluetoothServer;
 
-const SHADER_NAMES: [&str; 4] = ["circle.frag", "waves.frag", "mutation.frag", "grid.frag"];
+const SHADER_NAMES: [&str; 5] = ["waves.frag", "mutation.frag", "fractal.frag", "grid.frag", "rings.frag"];
 
 // --- Data Structures for Rendering ---
 
 // Uniform buffer struct that holds the current time to pass to the shader.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
-struct Uniforms {
-    time: f32,
+
+// Entire struct size must be a multiple of 16 bytes to meet GLSL buffer layout rules
+struct Uniforms { 
+    time: f32, // 4
+    _padding_0: [f32; 3], // 12
+    bluetooth_data: [f32; 3], // 12
+    screen_aspect_ratio: f32, // 4 
 }
 
 impl Uniforms {
     fn new() -> Self {
-        Self { time: 0.0 }
+        Self { time: 0.0, _padding_0: [0.0, 0.0, 0.0], bluetooth_data: [0.0, 0.0, 0.0], screen_aspect_ratio: 0.0, }
     }
 }
 
@@ -99,9 +107,11 @@ static VERTICES: LazyLock<[Vertex; 6]> = LazyLock::new(|| [
     Vertex::new(1.0, -1.0, 1.0, 0.0),    // Bottom-right
 ]);
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let mut use_window = false;
     let mut use_st7789 = false;
+    let mut use_bluetooth = false;
 
     let mut current_shader_index = 0;
     
@@ -111,6 +121,7 @@ fn main() {
         match arg.as_str() {
             "--window" => use_window = true,
             "--st7789" => use_st7789 = true,
+            "--bluetooth" => use_bluetooth = true,
             _ => {}
         }
     }
@@ -118,6 +129,7 @@ fn main() {
     // Print selected options
     println!("Using window display: {}", use_window);
     println!("Using st7789 display: {}", use_st7789);
+    println!("Using bluetooth: {}", use_bluetooth);
 
     if use_st7789 && cfg!(target_os = "windows") {
         panic!("st7789 display is not supported on Windows");
@@ -132,14 +144,14 @@ fn main() {
     }
 
     let output_size: u32 = 256;
-    let shaders_path = env::current_dir().unwrap().join("res").join("shaders");
+    let shaders_path = std::env::current_exe().unwrap().parent().unwrap().join("res").join("shaders");
     let compiled_vertex_shader_path = shaders_path.join("compiled").join("master.vert.spv");
     let compiled_fragment_shader_path = shaders_path.join("compiled").join("master.frag.spv");
 
     // Create and initialize st7789 driver if requested and on Linux 
     #[cfg(target_os = "linux")]
     let mut st7789 = if use_st7789 {
-        let mut driver = raspberry_st7789_driver::RaspberryST7789Driver::new().unwrap();
+        let mut driver = st7789_driver::RaspberryST7789Driver::new().unwrap();
         driver.initialize().unwrap();
         Some(driver)
     } else {
@@ -161,7 +173,7 @@ fn main() {
     };
 
     // Create a file watcher to monitor shader files for changes
-    let mut file_watcher = FileWatcher::new(env::current_dir().unwrap().join(shaders_path.clone().join("uncompiled")));
+    let mut file_watcher = FileWatcher::new(std::env::current_exe().unwrap().parent().unwrap().join(shaders_path.clone().join("uncompiled")));
     let start_time = Instant::now();
 
     // --- Create GPU resources for rendering ---
@@ -271,7 +283,23 @@ fn main() {
         (None, None)
     };
 
-    // --- Main loop ---
+    // --- Initialize bluetooth server ---
+    let bluetooth_server: Option<Arc<Mutex<Option<String>>>> = if use_bluetooth {
+        let server = BluetoothServer::new().await.unwrap();
+        let received_text = server.received_text.clone();
+    
+        tokio::spawn(async move {
+            server.run().await.unwrap();
+        });
+    
+        Some(received_text)
+    } else {
+        None
+    };
+
+    println!("Initialization complete. Starting main loop...");
+
+    // --- Main loop variables ---
 
     let mut running = true;
     let mut frame = 0;
@@ -281,12 +309,26 @@ fn main() {
     let stdin = File::open("/dev/stdin").unwrap();
     let fd = stdin.as_raw_fd();
     let flags = unsafe { fcntl(fd, F_GETFL) };
-    unsafe { fcntl(fd, F_SETFL, flags | O_NONBLOCK) };
+    unsafe { fcntl(fd, F_SETFL, flags | O_NONBLOCK) };    
+
+    let mut bluetooth_data = String::new();
 
     while running {
         frame += 1;
 
-        // 1. Handle window events
+        // 1. Check for data received by bluetooth server
+        if use_bluetooth {
+            // Check if the Bluetooth server is running and print the latest received message
+            if let Some(received_text) = &bluetooth_server {
+                if let Ok(message) = received_text.try_lock() {
+                    if let Some(ref string) = *message {
+                        bluetooth_data = string.clone();
+                    }
+                } 
+            }
+        }
+
+        // 2. Handle window events
         if use_window {
             running = handle_window_event(
                 running, 
@@ -297,7 +339,7 @@ fn main() {
             );
         }
 
-        // 2. Handle user input to switch shaders
+        // 3. Handle user input to switch shaders
         let mut force_recreate_shaders = false;
         let mut buf = [0u8; 1];
         if stdin.try_clone().unwrap().read(&mut buf).is_ok() {
@@ -308,19 +350,40 @@ fn main() {
             }
         }
 
-        // 3. Calculate elapsed time
+        // 4. Calculate elapsed time
         let elapsed_time = start_time.elapsed().as_secs_f32();
+        
+        // 5. Update uniform buffer with the new values
         uniforms.time = elapsed_time;
+        // Parse bluetooth data into a 3-element array
+        uniforms.bluetooth_data = if bluetooth_data.trim().is_empty() {
+            [0.0, 0.0, 0.0]
+        } else {
+            bluetooth_data
+                .split(',')
+                .map(|s| {
+                    let v: f32 = s.split(':').nth(1).unwrap().trim().parse().unwrap();
+                    (v.clamp(-10.0, 10.0)) / 10.0
+                })
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap()
+        };
+        uniforms.screen_aspect_ratio = if use_window {
+            surface_config.as_ref().unwrap().width as f32 / surface_config.as_ref().unwrap().height as f32
+        } else {
+            1.0
+        };
         queue.write_buffer(&uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
 
-        // 4. FPS Calculation: Print FPS every second
+        // 6. FPS Calculation: Print FPS every second
         if last_fps_update.elapsed() >= Duration::from_secs(1) {
             println!("FPS: {}", frame);
             frame = 0; // Reset counter
             last_fps_update = Instant::now(); // Reset timer
         }
 
-        // 5. Check for shader file changes, recompile them and recreate pipeline if necessary
+        // 7. Check for shader file changes, recompile them and recreate pipeline if necessary
         check_and_reload_shaders(
             &mut file_watcher,
             &device,
@@ -336,7 +399,7 @@ fn main() {
             force_recreate_shaders
         );
 
-        // 6a. Option: Render to the window surface
+        // 8a. Option: Render to the window surface
         if use_window {
             render_to_window(
                 &device,
@@ -348,7 +411,7 @@ fn main() {
             );
         }
 
-        // 6b. Option: Render to the ST7789 display
+        // 8b. Option: Render to the ST7789 display
         #[cfg(target_os = "linux")]
         if use_st7789 {
             render_to_st7789(
@@ -593,7 +656,7 @@ fn render_to_st7789(
     bind_group: &wgpu::BindGroup,
     output_image_texture: &wgpu::Texture,
     buffer: &wgpu::Buffer,
-    st7789: &mut raspberry_st7789_driver::RaspberryST7789Driver,
+    st7789: &mut st7789_driver::RaspberryST7789Driver,
 ) {
     // Create a texture view for the frame
     let view = output_image_texture.create_view(&wgpu::TextureViewDescriptor::default());

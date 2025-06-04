@@ -125,7 +125,7 @@ impl RaspberryST7789Driver {
         let side = (dim as f32).sqrt() as u32;
     
         let raw_image: ImageRawLE<Rgb565> = ImageRawLE::new(&rgb565_bytes, side);
-        let image = Image::new(&raw_image, Point::new(-17, 40));
+        let image = Image::new(&raw_image, Point::new(-16, 40));
         
         image.draw(&mut self.display);
         Ok(())

@@ -7,6 +7,8 @@ layout(location = 1) in vec2 vertex_texture_coordinates;
 // Uniforms
 layout(set = 0, binding = 0) uniform Uniforms {
     float time;
+    vec3 bluetooth_data;
+    float screen_aspect_ratio;
 };
 
 // Output fragment color
@@ -66,8 +68,7 @@ vec3 computeSceneNormal(vec3 position, float time) {
 void main() {
     vec2 uv = vertex_texture_coordinates * 2.0 - 1.0;
 
-    // Convert screen-space UV to world ray
-    vec2 fragCoord = uv * vec2(800.0 / 600.0, 1.0); // Correct aspect ratio if needed
+    uv.x *= screen_aspect_ratio;
 
     // Setup camera
     vec3 cameraPosition = vec3(1.0, 1.0, 1.0);
@@ -76,7 +77,7 @@ void main() {
     vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), forward));
     vec3 up = cross(forward, right);
 
-    vec3 cameraDirection = normalize(vec3(fragCoord, 1.0));
+    vec3 cameraDirection = normalize(vec3(uv, 1.0));
     cameraDirection = mat3(right, up, forward) * cameraDirection;
 
     // Apply rotation to simulate orbiting camera
