@@ -33,7 +33,7 @@ use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use libc::{fcntl, F_GETFL, F_SETFL, O_NONBLOCK};
 
-const SHADER_NAMES: [&str; 2] = ["circle.frag", "waves.frag"];
+const SHADER_NAMES: [&str; 4] = ["circle.frag", "waves.frag", "mutation.frag", "grid.frag"];
 
 // --- Data Structures for Rendering ---
 
@@ -302,7 +302,7 @@ fn main() {
         let mut buf = [0u8; 1];
         if stdin.try_clone().unwrap().read(&mut buf).is_ok() {
             if buf[0] == b' ' {
-                current_shader_index = (current_shader_index + 1) % 2;
+                current_shader_index = (current_shader_index + 1) % SHADER_NAMES.len();
                 println!("Switched to shader index: {}", current_shader_index);
                 force_recreate_shaders = true; 
             }

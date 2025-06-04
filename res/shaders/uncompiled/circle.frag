@@ -4,11 +4,12 @@
 layout(location = 0) in vec2 vertex_position;
 layout(location = 1) in vec2 vertex_texture_coordinates;
 
+// Uniforms
 layout(set = 0, binding = 0) uniform Uniforms {
     float time;
 };
 
-// Output data
+// Output fragment color
 layout(location = 0) out vec4 out_final_color;
 
 void main() {
