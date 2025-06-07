@@ -138,12 +138,15 @@ impl RaspberryST7789Driver {
 fn rgba8888_to_rgb565_u8(input: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity((input.len() / 4) * 2); // 2 bytes per pixel (RGB565)
 
+
     for chunk in input.chunks_exact(4) {
+        // Convert RGBA8888 to RGB565
         let rgb565: u16 =
             ((chunk[0] as u16 & 0xF8) << 8) | // Red: upper 5 bits
             ((chunk[1] as u16 & 0xFC) << 3) | // Green: upper 6 bits
             ((chunk[2] as u16) >> 3);         // Blue: upper 5 bits
 
+        // Split color value into two consecutive bytes 
         output.push((rgb565 & 0xFF) as u8);      // Low byte
         output.push((rgb565 >> 8) as u8);        // High byte
     }

@@ -354,26 +354,25 @@ async fn main() {
         let elapsed_time = start_time.elapsed().as_secs_f32();
         
         // 5. Update uniform buffer with the new values
+        // Assign elapsed time
         uniforms.time = elapsed_time;
-        // Parse bluetooth data into a 3-element array
+        // Parse and assign bluetooth data into a 3-element array
         uniforms.bluetooth_data = if bluetooth_data.trim().is_empty() {
             [0.0, 0.0, 0.0]
         } else {
-            bluetooth_data
-                .split(',')
-                .map(|s| {
+            bluetooth_data.split(',').map(|s| {
                     let v: f32 = s.split(':').nth(1).unwrap().trim().parse().unwrap();
                     (v.clamp(-10.0, 10.0)) / 10.0
-                })
-                .collect::<Vec<_>>()
-                .try_into()
-                .unwrap()
+                }).collect::<Vec<_>>().try_into().unwrap()
         };
+        // Assign screen aspect ratio, calculate it if rendering to window
         uniforms.screen_aspect_ratio = if use_window {
             surface_config.as_ref().unwrap().width as f32 / surface_config.as_ref().unwrap().height as f32
         } else {
             1.0
         };
+
+        // Write updated uniforms to the uniform buffer
         queue.write_buffer(&uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
 
         // 6. FPS Calculation: Print FPS every second
@@ -728,11 +727,16 @@ fn check_and_reload_shaders(
     } else if let Some(paths) = file_watcher.get_changes() {
         for path in paths {
             let file_name = path.file_name().unwrap();
-            println!("Shader change detected: {:?}. Name: {:?}", path, file_name);
+            println!("Shader file change detected: {:?}. Name: {:?}", path, file_name);
 
+            // Check if the changed file is a vertex
             if file_name.to_str().unwrap().ends_with(".vert") {
                 println!("Recompiling vertex shader: {:?}", path);
+
+                // Compile the vertex shader
                 compile_shader(vertex_shader_path.clone(), compiled_vertex_shader_path.clone());
+
+                // Create a new shader module from the compiled SPIR-V file
                 *vertex_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("master_vertex_shader"),
                     source: wgpu::util::make_spirv(&fs::read(compiled_vertex_shader_path).expect("Failed to read vertex shader")),
@@ -740,9 +744,14 @@ fn check_and_reload_shaders(
                 changed = true;
             }
 
+            // Check if the changed file is a fragment shader
             if file_name.to_str().unwrap().ends_with(".frag") {
                 println!("Recompiling fragment shader: {:?}", path);
+
+                // Compile the fragment shader
                 compile_shader(fragment_shader_path.clone(), compiled_fragment_shader_path.clone());
+
+                // Create a new shader module from the compiled SPIR-V file
                 *fragment_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("master_fragment_shader"),
                     source: wgpu::util::make_spirv(&fs::read(compiled_fragment_shader_path).expect("Failed to read fragment shader")),
@@ -752,6 +761,7 @@ fn check_and_reload_shaders(
         }
     }
 
+    // If shaders were changed, recreate the render pipeline
     if changed {
         *render_pipeline = create_render_pipeline(
             device,

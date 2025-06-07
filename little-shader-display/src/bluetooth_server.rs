@@ -79,35 +79,35 @@ impl BluetoothServer {
             let mut message_buffer = String::new();
 
             loop {
-                let n = match stream.read(&mut read_buffer).await {
+                match stream.read(&mut read_buffer).await {
                     Ok(0) => {
                         println!("Client disconnected.");
                         break;
                     }
-                    Ok(n) => n,
+                    Ok(n) => {
+                        // Decode and append to the message buffer
+                        if let Ok(text) = std::str::from_utf8(&read_buffer[..n]) {
+                            message_buffer.push_str(text);
+
+                            // Process each complete message line
+                            while let Some(idx) = message_buffer.find('\n') {
+                                // Get line without \n
+                                let line = message_buffer[..idx].trim();
+
+                                // Store the complete line text in the mutex so other code can access it
+                                *self.received_text.lock().await = Some(line.to_string());
+
+                                // Remove processed line from the buffer
+                                message_buffer = message_buffer[idx + 1..].to_string();
+                            }
+                        } else {
+                            message_buffer.clear();
+                        }
+                    }
                     Err(err) => {
                         println!("Read failed: {}", err);
                         break;
                     }
-                };
-
-                // Decode and append to the message buffer
-                if let Ok(text) = std::str::from_utf8(&read_buffer[..n]) {
-                    message_buffer.push_str(text);
-
-                    // Process each complete message line
-                    while let Some(idx) = message_buffer.find('\n') {
-                        let line = message_buffer[..idx].trim(); // Get line without \n
-
-                        // Store or parse here
-                        let mut text_lock = self.received_text.lock().await;
-                        *text_lock = Some(line.to_string());
-
-                        // Remove processed line from the buffer
-                        message_buffer = message_buffer[idx + 1..].to_string();
-                    }
-                } else {
-                    message_buffer.clear(); // Optionally discard
                 }
             }
 

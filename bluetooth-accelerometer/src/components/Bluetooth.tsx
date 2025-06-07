@@ -78,13 +78,17 @@ export default function Bluetooth({
   }
 
   // Start Bluetooth discovery
+  // This function requests Bluetooth permissions, checks Bluetooth availability,
+  // starts device discovery, and updates the UI with the results.
   async function discoverDevices() {
+    // Request necessary Bluetooth permissions from the user.
     const hasPermissions = await requestBluetoothPermissions();
     if (!hasPermissions) {
       Alert.alert('Error', 'Bluetooth permissions are required to discover devices.');
       return;
     }
 
+    // Check if Bluetooth is available on the device.
     try {
       const available = await RNBluetoothClassic.isBluetoothAvailable();
       console.log('Bluetooth available:', available);
@@ -93,13 +97,16 @@ export default function Bluetooth({
       Alert.alert('Error', 'Could not check Bluetooth availability.\n' + error);
     }
 
+    // Set discovering state to true and clear the current device list.
     setDiscovering(true);
     setDevices([]);
 
     try {
+      // Start Bluetooth device discovery.
       const availableDevices = await RNBluetoothClassic.startDiscovery();
       setDevices(availableDevices);
 
+      // Show a toast notification with the number of devices found.
       Toast.show({
         type: 'info',
         text1: `Found ${availableDevices.length} devices`,
@@ -107,6 +114,7 @@ export default function Bluetooth({
         visibilityTime: 1500, 
       });
     } catch (error) {
+      // Show an error toast if discovery fails.
       Toast.show({
         type: 'error',
         text1: `Could not discover devices`,
@@ -114,6 +122,7 @@ export default function Bluetooth({
         visibilityTime: 3000, 
       });
     } finally {
+      // Always set discovering state to false when done.
       setDiscovering(false);
     }
   }

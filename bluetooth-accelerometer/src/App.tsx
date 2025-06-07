@@ -61,6 +61,7 @@ function App(): React.JSX.Element {
       const textToSend = `X: ${x.toFixed(2)}, Y: ${y.toFixed(2)}, Z: ${z.toFixed(2)}\n`;
       await connectedDevice.write(textToSend);
     } catch (error) {
+      // Silently catch the error
     }
   }
 
