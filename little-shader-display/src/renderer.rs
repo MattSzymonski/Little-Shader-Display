@@ -11,7 +11,7 @@ use std::{
 use bytemuck::{cast_slice};
 use std::time::Instant;
 
-use crate::SHADER_NAMES;
+use crate::{DEBUG_OVERHEADS, SHADER_NAMES};
 use crate::ST7789_OUTPUT_SIZE;
 use crate::SHADERS_PATH;
 use crate::COMPILED_VERTEX_SHADER_PATH;
@@ -202,31 +202,31 @@ impl Renderer {
         // 9. Create offscreen texture for rendering (used by ST7789 to read pixels)
         #[cfg(target_os = "linux")]
         let (st7789_render_target, st7789_render_buffer) = if use_st7789 {
-            let output_image_size = wgpu::Extent3d {
-                width: ST7789_OUTPUT_SIZE,
-                height: ST7789_OUTPUT_SIZE,
-                depth_or_array_layers: 1,
-            };
+                let output_image_size = wgpu::Extent3d {
+                    width: ST7789_OUTPUT_SIZE,
+                    height: ST7789_OUTPUT_SIZE,
+                    depth_or_array_layers: 1,
+                };
 
-            let output_image_texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Render Texture"),
-                size: output_image_size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: output_format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
+                let output_image_texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Render Texture"),
+                    size: output_image_size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: output_format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                });
         
             let data_size = (ST7789_OUTPUT_SIZE * ST7789_OUTPUT_SIZE * 4) as u64; // 4 bytes per pixel (RGBA)
 
-            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Read Buffer"),
-                size: data_size,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Read Buffer"),
+                    size: data_size,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
         
             (Some(output_image_texture), Some(buffer))
         } else {
@@ -403,6 +403,10 @@ impl Renderer {
 
         // Submit the command encoder to the queue
         self.queue.submit(once(encoder.finish()));
+
+        if DEBUG_OVERHEADS {
+            self.device.poll(wgpu::Maintain::Wait); // Wait for GPU to finish
+        }
         let render_ms = render_start.elapsed().as_secs_f64() * 1000.0;
 
         // Present the frame to the window
@@ -412,12 +416,16 @@ impl Renderer {
         );
         let readback_ms = render_start.elapsed().as_secs_f64() * 1000.0 - render_ms;
 
-        // Draw the texture data to the ST7789 display
-        self.st7789_driver.as_mut().unwrap().draw(&texture_data, false).unwrap();
-        let draw_ms = render_start.elapsed().as_secs_f64() * 1000.0 - render_ms - readback_ms;
+        // Convert RGBA8888 to RGB565 (LE packed bytes)
+        let rgb565_bytes = rgba8888_to_rgb565_u8(&texture_data, false);
+        let color_conversion_ms = render_start.elapsed().as_secs_f64() * 1000.0 - render_ms - readback_ms;
 
-        //println!("Render time: {:.2}ms, GPU readback time: {:.2} ms, Draw time: {:.2} ms", render_ms, readback_ms, draw_ms);
+        self.st7789_driver.as_mut().unwrap().draw(&rgb565_bytes).unwrap();
+        let draw_ms = render_start.elapsed().as_secs_f64() * 1000.0 - render_ms - readback_ms - color_conversion_ms;
 
+        if DEBUG_OVERHEADS {
+            println!("Render time: {:.2}ms, GPU readback time: {:.2}ms, Color conversion time: {:.2}ms, Draw time: {:.2}ms", render_ms, readback_ms, color_conversion_ms, draw_ms);
+        }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -625,4 +633,49 @@ fn save_as_png(data: Vec<u8>, width: u32, height: u32, path: &str) -> Result<(),
     let img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> = image::ImageBuffer::from_raw(width, height, data).unwrap();
     img.save(std::path::Path::new(path))?;
     Ok(())
+}
+
+// Converts RGBA8888 (4 bytes per pixel) to RGB565 (2 bytes per pixel, little-endian)
+// Skips the alpha channel entirely.
+fn rgba8888_to_rgb565_u8(input: &[u8], flip_order: bool) -> Vec<u8> {
+    let mut output = Vec::with_capacity((input.len() / 4) * 2); // 2 bytes per pixel (RGB565)
+    for chunk in input.chunks_exact(4) {
+
+        let r = if flip_order { chunk[2] } else { chunk[0] };
+        let g = chunk[1];
+        let b = if flip_order { chunk[0] } else { chunk[2] };
+
+        // Convert RGBA8888 to RGB565
+        let rgb565: u16 =
+            ((r as u16 & 0xF8) << 8) | // Red: upper 5 bits
+            ((g as u16 & 0xFC) << 3) | // Green: upper 6 bits
+            ((b as u16) >> 3);         // Blue: upper 5 bits
+
+        // Split color value into two consecutive bytes 
+        output.push((rgb565 & 0xFF) as u8);      // Low byte
+        output.push((rgb565 >> 8) as u8);        // High byte
+    }
+
+    output
+}
+
+fn rgba8888_to_rgb565(input: &[u8], flip_order: bool) -> Vec<u16> {
+    let mut output = Vec::with_capacity((input.len() / 4) * 2); // 2 bytes per pixel (RGB565)
+    for chunk in input.chunks_exact(4) {
+
+        let r = if flip_order { chunk[2] } else { chunk[0] };
+        let g = chunk[1];
+        let b = if flip_order { chunk[0] } else { chunk[2] };
+
+        // Convert RGBA8888 to RGB565
+        let rgb565: u16 =
+            ((r as u16 & 0xF8) << 8) | // Red: upper 5 bits
+            ((g as u16 & 0xFC) << 3) | // Green: upper 6 bits
+            ((b as u16) >> 3);         // Blue: upper 5 bits
+
+        // Split color value into two consecutive bytes 
+        output.push(rgb565);      // Low byte
+    }
+
+    output
 }

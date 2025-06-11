@@ -29,7 +29,8 @@ use std::os::unix::io::AsRawFd;
 use libc::{fcntl, F_GETFL, F_SETFL, O_NONBLOCK};
 use bluetooth_server::BluetoothServer;
 
-static SHADER_NAMES: [&str; 5] = ["waves.frag", "mutation.frag", "fractal.frag", "grid.frag", "rings.frag"];
+static DEBUG_OVERHEADS: bool = false;
+static SHADER_NAMES: [&str; 6] = ["waves.frag", "mutation.frag", "fractal.frag", "grid.frag", "rings.frag", "tilt.frag"];
 static ST7789_OUTPUT_SIZE: u32 = 256;
 
 static SHADERS_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
@@ -177,7 +178,7 @@ async fn main() {
             if buffer[0] == b' ' {
                 current_shader_index = (current_shader_index + 1) % SHADER_NAMES.len();
                 println!("Switched to shader index: {}", current_shader_index);
-                renderer.recompile_shaders(current_shader_index, true, true);
+                renderer.recompile_shaders(current_shader_index, false, true);
             }
         }
 

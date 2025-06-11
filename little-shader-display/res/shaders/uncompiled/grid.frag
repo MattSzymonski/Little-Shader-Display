@@ -52,10 +52,10 @@ void main() {
     color += 0.5 * exp(-(thickness / 3.0) * b.y);                        // Vertical soft glow
 
     // Color blending (ripple red, grid white)
-    vec3 rippleColor = vec3(1.0, 0.0, 0.0);
-    vec3 gridColor = vec3(1.0);
-    vec3 finalColor = mix(gridColor, rippleColor, fade) * color;
+    vec3 ripple_color = vec3(1.0, 0.0, 0.0);
+    vec3 grid_color = vec3(1.0);
+    vec3 final_color = mix(grid_color, ripple_color, fade) * color;
 
     // Output final fragment color
-    out_final_color = vec4(finalColor, 1.0);
+    out_final_color = vec4(final_color, 1.0);
 }

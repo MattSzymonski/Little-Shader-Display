@@ -1,6 +1,6 @@
 use bluer::rfcomm::{Listener, SocketAddr};
 use tokio::sync::Mutex;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::sync::Arc;
 
 pub struct BluetoothServer {
@@ -40,14 +40,10 @@ impl BluetoothServer {
 
         // Log server address and channel info
         println!(
-            "Listening on {} channel {}. Press enter to quit.",
+            "Listening on {} channel {}",
             listener.as_ref().local_addr()?.addr,
             listener.as_ref().local_addr()?.channel
         );
-
-        // Create a buffered reader to read from stdin for quit detection
-        let stdin = BufReader::new(tokio::io::stdin());
-        let mut lines = stdin.lines();
 
         loop {
             println!("\nWaiting for connection...");
@@ -112,7 +108,5 @@ impl BluetoothServer {
             }
             println!("Connection closed.");
         }
-
-        Ok(())
     }
 }
