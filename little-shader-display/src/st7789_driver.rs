@@ -116,9 +116,9 @@ impl RaspberryST7789Driver {
         Ok(())
     }
     
-    pub fn draw_raw(&mut self, image_bytes: &[u8]) -> Result<(), Box<dyn Error>> {
+    pub fn draw(&mut self, image_bytes: &[u8], flip_order: bool) -> Result<(), Box<dyn Error>> {
         // Convert RGBA8888 to RGB565 (LE packed bytes)
-        let rgb565_bytes = rgba8888_to_rgb565_u8(image_bytes);
+        let rgb565_bytes = rgba8888_to_rgb565_u8(image_bytes, flip_order);
     
         // Compute square side size from byte count
         let dim = (rgb565_bytes.len() / 2) as u32;
@@ -135,16 +135,19 @@ impl RaspberryST7789Driver {
 
 // Converts RGBA8888 (4 bytes per pixel) to RGB565 (2 bytes per pixel, little-endian)
 // Skips the alpha channel entirely.
-fn rgba8888_to_rgb565_u8(input: &[u8]) -> Vec<u8> {
+fn rgba8888_to_rgb565_u8(input: &[u8], flip_order: bool) -> Vec<u8> {
     let mut output = Vec::with_capacity((input.len() / 4) * 2); // 2 bytes per pixel (RGB565)
-
-
     for chunk in input.chunks_exact(4) {
+
+        let r = if flip_order { chunk[2] } else { chunk[0] };
+        let g = chunk[1];
+        let b = if flip_order { chunk[0] } else { chunk[2] };
+
         // Convert RGBA8888 to RGB565
         let rgb565: u16 =
-            ((chunk[0] as u16 & 0xF8) << 8) | // Red: upper 5 bits
-            ((chunk[1] as u16 & 0xFC) << 3) | // Green: upper 6 bits
-            ((chunk[2] as u16) >> 3);         // Blue: upper 5 bits
+            ((r as u16 & 0xF8) << 8) | // Red: upper 5 bits
+            ((g as u16 & 0xFC) << 3) | // Green: upper 6 bits
+            ((b as u16) >> 3);         // Blue: upper 5 bits
 
         // Split color value into two consecutive bytes 
         output.push((rgb565 & 0xFF) as u8);      // Low byte

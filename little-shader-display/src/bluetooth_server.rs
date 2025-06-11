@@ -52,18 +52,13 @@ impl BluetoothServer {
         loop {
             println!("\nWaiting for connection...");
 
-            // Wait for a client to connect or user input to quit
-            let (mut stream, sa) = tokio::select! {
-                l = listener.accept() => {
-                    match l {
-                        Ok(v) => v,
-                        Err(err) => {
-                            println!("Accepting connection failed: {}", &err);
-                            continue;
-                        }
-                    }
-                },
-                _ = lines.next_line() => break,
+            // Wait for a client to connect
+            let (mut stream, sa) = match listener.accept().await {
+                Ok(v) => v,
+                Err(err) => {
+                    println!("Accepting connection failed: {}", &err);
+                    continue;
+                }
             };
 
             println!("Accepted connection from {:?}", &sa);
