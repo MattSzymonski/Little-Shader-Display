@@ -38,24 +38,23 @@ export default function Accelerometer({
   useEffect(() => {
     // Set accelerometer update interval (ms)
     setUpdateIntervalForType(SensorTypes.accelerometer, sampleInterval);
-
+  
     // Subscribe to accelerometer stream
     const subscription = accelerometer.subscribe(({ x, y, z }) => {
-      const inverted = { x: -x, y: -y, z: -z };
-
+  
       // Smooth the data using lerp
       smoothedData.current = {
-        x: lerp(smoothedData.current.x, inverted.x, SMOOTHING_ALPHA),
-        y: lerp(smoothedData.current.y, inverted.y, SMOOTHING_ALPHA),
-        z: lerp(smoothedData.current.z, inverted.z, SMOOTHING_ALPHA),
+        x: lerp(smoothedData.current.x, -x, SMOOTHING_ALPHA),
+        y: lerp(smoothedData.current.y, -y, SMOOTHING_ALPHA),
+        z: lerp(smoothedData.current.z, -z, SMOOTHING_ALPHA),
       };
-
+  
       // Send smoothed data to parent (used for Bluetooth transmission)
       setAccelerometerData(smoothedData.current);
-
+  
       // Optional: show raw (inverted) data in the UI
-      setData(inverted);
-
+      setData({ x: -x, y: -y, z: -z });
+  
       // Update animation target (based on raw values for snappier UI)
       target.current = {
         x: -x * (BOUNDARY_SIZE / 2 - BALL_SIZE / 2) / 10,

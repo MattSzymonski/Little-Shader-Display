@@ -44,7 +44,8 @@ const SHADER_NAMES: [&str; 5] = ["waves.frag", "mutation.frag", "fractal.frag", 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 
-// Entire struct size must be a multiple of 16 bytes to meet GLSL buffer layout rules
+// Entire struct size must be a multiple of
+// 16 bytes to meet GLSL buffer layout rules
 struct Uniforms { 
     time: f32, // 4
     _padding_0: [f32; 3], // 12
